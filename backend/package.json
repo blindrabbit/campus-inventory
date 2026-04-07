@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "predev": "prisma generate",
+    "predev": "prisma generate && prisma db push",
     "dev": "nodemon src/server.js",
-    "prestart": "prisma generate",
+    "prestart": "prisma generate && prisma db push",
     "start": "node src/server.js",
     "seed": "node scripts/seed-xlsx.js",
     "prisma:generate": "prisma generate",

@@ -48,6 +48,11 @@ router.post('/login', async (req, res) => {
     });
   } catch (err) {
     console.error('Login error:', err);
+    if (err?.message === "Falha na autenticação LDAP") {
+      return res
+        .status(503)
+        .json({ error: "Serviço de autenticação indisponível" });
+    }
     res.status(500).json({ error: 'Erro interno no servidor' });
   }
 });
