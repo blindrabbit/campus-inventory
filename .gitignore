@@ -1,0 +1,9 @@
+node_modules
+*.sqlite
+*.db
+.env
+.specify/memory
+.DS_Store
+coverage
+.next
+dist

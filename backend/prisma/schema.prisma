@@ -1,0 +1,90 @@
+// backend/prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String   @id @default(cuid())
+  samAccountName String   @unique
+  fullName       String
+  role           String   @default("CONFERENTE")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  @@map("users")
+}
+
+model Space {
+  id            String     @id @default(cuid())
+  name          String
+  responsible   String
+  isActive      Boolean    @default(true)
+  isFinalized   Boolean    @default(false)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  
+  items         Item[]
+  relocationOut Relocation[] @relation("RelocationSource")
+  relocationIn  Relocation[] @relation("RelocationTarget")
+  
+  @@map("spaces")
+}
+
+model Item {
+  id                String     @id @default(cuid())
+  patrimonio        String     @unique
+  descricao         String
+  valor             Float?
+  condicaoOriginal  String
+  fornecedor        String?
+  cnpjFornecedor    String?    @map("cnpj_fornecedor")
+  catalogo          String?
+  codigoSIA         String?    @map("codigo_sia")
+  descricaoSIA      String?    @map("descricao_sia")
+  numeroEntrada     String?    @map("numero_entrada")
+  dataEntrada       DateTime?  @map("data_entrada")
+  dataAquisicao     DateTime?  @map("data_aquisicao")
+  documento         String?
+  dataDocumento     DateTime?  @map("data_documento")
+  tipoAquisicao     String?    @map("tipo_aquisicao")
+  
+  // Dados da conferência
+  spaceId           String
+  space             Space      @relation(fields: [spaceId], references: [id])
+  
+  statusEncontrado  String     @default("NAO") @map("Encontrado")
+  condicaoVisual    String?
+  dataConferencia   DateTime?
+  ultimoConferente  String?
+  
+  // Relocações
+  relocationIn      Relocation? @relation("ItemRelocation")
+  
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  
+  @@map("items")
+}
+
+model Relocation {
+  id              String   @id @default(cuid())
+  itemId          String   @unique
+  item            Item     @relation("ItemRelocation", fields: [itemId], references: [id], onDelete: Cascade)
+  
+  fromSpaceId     String
+  fromSpace       Space    @relation("RelocationSource", fields: [fromSpaceId], references: [id])
+  
+  toSpaceId       String
+  toSpace         Space    @relation("RelocationTarget", fields: [toSpaceId], references: [id])
+  
+  movedBy         String
+  movedAt         DateTime @default(now())
+  pendingConfirm  Boolean  @default(true)
+  
+  @@map("relocations")
+}
