@@ -48,6 +48,55 @@ router.get('/', verifyJWT, async (req, res) => {
   }
 });
 
+router.get("/search", verifyJWT, async (req, res) => {
+  try {
+    const q = req.query.q?.toString().trim();
+    const excludeSpaceId = req.query.excludeSpaceId?.toString();
+
+    if (!q || q.length < 2) {
+      return res
+        .status(400)
+        .json({ error: "Informe ao menos 2 caracteres para busca" });
+    }
+
+    const where = {
+      OR: [{ patrimonio: { contains: q } }, { descricao: { contains: q } }],
+      ...(excludeSpaceId ? { NOT: { spaceId: excludeSpaceId } } : {}),
+    };
+
+    const matches = await prisma.item.findMany({
+      where,
+      select: {
+        id: true,
+        patrimonio: true,
+        descricao: true,
+        spaceId: true,
+        space: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+      },
+      take: 20,
+      orderBy: { patrimonio: "asc" },
+    });
+
+    res.json(
+      matches.map((item) => ({
+        id: item.id,
+        patrimonio: item.patrimonio,
+        descricao: item.descricao,
+        spaceId: item.spaceId,
+        spaceName: item.space?.name || "Sem localização",
+      })),
+    );
+  } catch (err) {
+    console.error("Error searching items:", err);
+    res.status(500).json({ error: "Erro ao buscar patrimônios" });
+  }
+});
+
 router.post('/check', verifyJWT, async (req, res) => {
   try {
     const { itemId, condicao } = req.body;

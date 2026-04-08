@@ -1,0 +1,92 @@
+@keyframes ci-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ci-scale-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.ci-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.62);
+  animation: ci-fade-in 180ms ease-out;
+}
+
+.ci-modal {
+  width: 100%;
+  background: #ffffff;
+  border-radius: 0.9rem;
+  box-shadow: 0 20px 45px rgba(15, 23, 42, 0.25);
+  animation: ci-scale-in 190ms ease-out;
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  outline: none;
+}
+
+.ci-modal--sm {
+  max-width: 24rem;
+}
+
+.ci-modal--md {
+  max-width: 32rem;
+}
+
+.ci-modal--lg {
+  max-width: 42rem;
+}
+
+.ci-modal-title {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: #111827;
+  padding: 1.25rem 1.25rem 0;
+}
+
+.ci-modal-header,
+.ci-modal-body,
+.ci-modal-footer {
+  padding: 1.25rem;
+}
+
+.ci-modal-header {
+  padding-bottom: 0;
+}
+
+.ci-modal-body {
+  color: #4b5563;
+}
+
+.ci-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  border-top: 1px solid #e5e7eb;
+}
+
+@media (max-width: 640px) {
+  .ci-modal-footer {
+    flex-direction: column-reverse;
+  }
+
+  .ci-modal-footer > * {
+    width: 100%;
+  }
+}

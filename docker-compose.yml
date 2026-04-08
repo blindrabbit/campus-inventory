@@ -5,6 +5,7 @@ services:
       - "8088:8000"
     volumes:
       - ./backend:/app
+      - ./inventario.xlsx:/app/inventario.xlsx:ro
       - backend-modules:/app/node_modules
       - db-data:/app/data
     environment:
@@ -25,7 +26,7 @@ services:
       - frontend-modules:/app/node_modules
       - frontend-cache:/app/.next
     environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8088/api"
+      NEXT_PUBLIC_API_URL: "/api"
     command: ["pnpm", "dev"]
     depends_on:
       - backend

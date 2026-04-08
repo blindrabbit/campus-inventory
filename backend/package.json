@@ -8,6 +8,7 @@
     "prestart": "prisma generate && prisma db push",
     "start": "node src/server.js",
     "seed": "node scripts/seed-xlsx.js",
+    "promote-admin": "node scripts/promote-admin.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev"
   },
