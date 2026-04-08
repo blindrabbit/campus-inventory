@@ -269,3 +269,50 @@ showToast()
 frontend/src/app/dashboard/page.js
 window.alert()
 showToast()
+
+## 🔍 Fase 9: Busca + CRUD de Espaços + UI Patterns
+
+### Busca de Espaços
+
+- [ ] Criar componente `SpaceSearchBar` com:
+  - [ ] Input com debounce 300ms
+  - [ ] Dropdown de resultados (máx 10)
+  - [ ] Navegação por teclado (↑↓ Enter ESC)
+  - [ ] Atalho Ctrl+K para focar
+- [ ] Implementar endpoint `GET /api/spaces/search?q=string`
+- [ ] Integrar SearchBar no header do Dashboard e da Room
+
+### CRUD de Espaços (Admin)
+
+- [ ] Criar página `/admin/spaces` com tabela e formulário inline
+- [ ] Implementar endpoints REST: POST/PUT/DELETE em `/api/admin/spaces`
+- [ ] Validação: nome único, não desativar se tiver itens
+- [ ] Atualizar modal de realocação para listar apenas `isActive=true`
+
+### Substituir Alerts por Componentes Customizados
+
+- [ ] Criar `ConfirmModal.jsx` e `ToastContainer.jsx`
+- [ ] Criar contexto `ToastContext` para gerenciamento global
+- [ ] Refatorar `room/[spaceId]/page.js`:
+  - [ ] `window.confirm()` → `<ConfirmModal variant="danger" />`
+  - [ ] `window.alert()` → `showToast({ type: 'error' })`
+- [ ] Refatorar `dashboard/page.js` e outras páginas similares
+
+### Notificação em Tempo Real
+
+- [ ] Configurar `socket.io` no backend (servidor + eventos)
+- [ ] Implementar listener no frontend ao entrar em uma sala
+- [ ] Disparar evento `item-moved` ao realocar item
+- [ ] Exibir toast automático ao receber evento
+- [ ] Fallback para polling se WebSocket falhar
+
+## 📊 Fase 10: Painel de Auditoria
+
+- [ ] Criar página `/admin/unfound-items` com:
+  - [ ] Tabela com filtros (período, espaço, conferente, ação)
+  - [ ] Colunas conforme especificação
+  - [ ] Botão "Ver Histórico" (abre modal com timeline)
+  - [ ] Botão "Marcar como Encontrado" (reverte status)
+- [ ] Implementar endpoint `GET /api/admin/unfound-items` com paginação
+- [ ] Criar endpoint `GET /api/items/:id/historico` para timeline
+- [ ] Adicionar exportação de auditoria: `GET /api/export/audit-xlsx`
