@@ -23,7 +23,14 @@ export default function LoginPage() {
       const { data } = await axios.post(`${API}/auth/login`, credentials);
       localStorage.setItem("token", data.token);
       localStorage.setItem("user", JSON.stringify(data.user));
-      router.push("/dashboard");
+      if (data.activeInventory?.id) {
+        localStorage.setItem("activeInventoryId", data.activeInventory.id);
+        localStorage.setItem(
+          "activeInventory",
+          JSON.stringify(data.activeInventory),
+        );
+      }
+      router.push("/inventories");
     } catch (err) {
       setError(err.response?.data?.error || "Erro ao fazer login");
     } finally {

@@ -2,7 +2,13 @@
 
 ## 🎯 Visão Geral
 
-Aplicação web colaborativa para mapeamento físico de inventário patrimonial do Campus Aracruz, substituindo planilhas manuais por fluxo guiado de conferência por espaço, com auto-save, sincronização offline e exportação 100% compatível com `inventario.xlsx`.
+Aplicação web colaborativa para mapeamento físico de inventário patrimonial, substituindo planilhas manuais por fluxo guiado de conferência por espaço, com auto-save, sincronização offline e exportação compatível com o formato institucional.
+
+Além do ciclo inicial, o sistema deve suportar **N verificações de inventário** (múltiplas campanhas), permitindo:
+
+- iniciar um novo ciclo a partir de um ciclo anterior já finalizado
+- iniciar um novo ciclo a partir de upload de novo arquivo XLSX no formato esperado
+- controlar usuários permitidos por ciclo, campus associado e estado operacional do ciclo
 
 ## 👤 Perfis de Usuário
 
@@ -18,15 +24,189 @@ Aplicação web colaborativa para mapeamento físico de inventário patrimonial 
 - **Sessão**: JWT emitido após bind LDAP bem-sucedido, com `{ sub, role, fullName }` no payload
 - **Provisionamento**: Primeiro login cria registro `User` automaticamente com role `CONFERENTE`
 - **Promoção para ADMIN**: Via script `promote-admin.js` (só após primeiro login)
+- **Sincronização de nome**: após login LDAP bem-sucedido, o sistema deve resolver o objeto do AD e persistir no banco local o `CN`/`displayName` do usuário como `fullName`
+- **Nome canônico**: o valor exibido como nome do usuário deve vir do AD, não do siape digitado; o siape permanece apenas como `sAMAccountName`
+- **Busca atômica de identidade**: a resolução do usuário no AD deve priorizar filtro explícito por `sAMAccountName`, `employeeID`, `uid`, `cn` e `displayName`, evitando depender de um retorno genérico de busca
+- **Fallback seguro**: se o AD não devolver `CN`/`displayName`, o sistema pode manter o nome local existente, mas nunca substituir o nome por um valor parcial derivado do login
+- **Bind obrigatório**: a busca de nome exige bind técnico configurado (`LDAP_BIND_USER` e `LDAP_BIND_PASS`) e o container do backend precisa ser recriado quando esses valores mudarem
+
+### Guardrails de Não Regressão (Obrigatórios)
+
+- Alterações em autenticação **não podem** quebrar o parse do payload JSON em `POST /api/auth/login`.
+- Erros de dependência/runtime devem retornar `500` ou `503` com mensagem padronizada; **não** mascarar falhas internas como `400` de validação.
+- O contrato de login deve permanecer estável: entrada `{ sAMAccountName, password }` e saída `{ token, user, activeInventory }` quando autenticado.
+- Funcionalidades já validadas em produção local (login, listagem de inventários autorizados, dashboard e sala com `inventoryId`) devem manter compatibilidade retroativa.
+- Mudanças de autorização por inventário devem ser incrementais: nunca remover permissões existentes sem ação explícita de um `ADMIN_CICLO`.
+- Toda nova regra de autorização deve ser aplicada em middleware único/reutilizável, evitando divergência entre rotas.
+
+## 🧭 Gestão de Ciclos de Inventário (N Verificações)
+
+### Entidade de Ciclo
+
+Cada verificação de inventário deve ser representada por um **ciclo** com metadados próprios:
+
+- `nome`
+- `campusId` ou identificador de campus
+- `fonteDados`: `REUTILIZAR_CICLO` ou `UPLOAD_XLSX`
+- `cicloBaseId` (obrigatório quando `fonteDados=REUTILIZAR_CICLO`)
+- `arquivoOrigem` (obrigatório quando `fonteDados=UPLOAD_XLSX`)
+- `statusOperacao` (ver tabela de estados)
+- `createdBy`, `createdAt`, `startedAt`, `finishedAt`
+
+### Estados Operacionais do Ciclo
+
+| Estado           | Descrição                                    | Regras principais                                                                 |
+| ---------------- | -------------------------------------------- | --------------------------------------------------------------------------------- |
+| **Não iniciado** | Ciclo criado, ainda sem execução             | Permite configurar usuários, espaços e fonte de dados                             |
+| **Em execução**  | Ciclo em andamento                           | Permite conferência, realocação e atualização de itens conforme perfil autorizado |
+| **Pausado**      | Execução interrompida temporariamente        | Bloqueia ações de conferência, mantém consulta e administração                    |
+| **Em Auditoria** | Coleta encerrada, ciclo em revisão/validação | Bloqueia novas conferências, permite ajustes de auditoria por perfis autorizados  |
+| **Finalizado**   | Ciclo concluído e fechado                    | Torna o ciclo elegível para reutilização como base de novo ciclo                  |
+| **Cancelado**    | Ciclo encerrado sem validade operacional     | Mantém histórico, não pode ser reaberto para conferência                          |
+
+### Reutilização de Inventário Anterior
+
+- Apenas ciclos em estado **Finalizado** podem ser usados como base.
+- Ao criar um novo ciclo por reutilização, o sistema deve copiar os dados patrimoniais consolidados do ciclo base para o novo contexto.
+- O novo ciclo deve manter trilha de origem (`cicloBaseId`) para auditoria.
+
+### Novo Ciclo via Upload XLSX
+
+- O upload deve validar cabeçalhos e estrutura antes da carga.
+- Em caso de divergência de layout, o sistema deve bloquear a importação e exibir os campos esperados.
+- A carga inicial do ciclo deve ser idempotente por `patrimonio + cicloId`.
+
+### Gestão de Usuários Permitidos por Ciclo
+
+- Cada ciclo deve possuir lista explícita de usuários autorizados.
+- Perfis por ciclo: `ADMIN_CICLO`, `CONFERENTE`, `REVISOR`, `VISUALIZADOR`.
+- Usuário sem vínculo ao ciclo não pode acessar telas operacionais desse ciclo.
+
+### Gestão Global de Usuários (CRUD Geral)
+
+- Deve existir uma área administrativa central para **gerenciamento global de usuários locais**.
+- A listagem deve exibir todos os usuários cadastrados no banco local, com:
+  - `CN` (nome completo)
+  - `sAMAccountName` (siape/login)
+  - papel global do usuário
+- O `CN` exibido na listagem deve refletir o nome persistido localmente após sincronização de login LDAP.
+- Cada card de usuário deve mostrar os inventários em que ele possui vínculo por meio de badges.
+- Cada badge de inventário deve permitir remoção rápida do vínculo:
+  - o ícone de remoção (`x`) aparece ao passar o mouse sobre a badge
+  - a remoção exige confirmação explícita em modal
+- Cada card deve conter ação `add` para incluir o usuário em um inventário:
+  - selecionar inventário de destino
+  - selecionar perfil no inventário (`ADMIN_CICLO`, `CONFERENTE`, `REVISOR`, `VISUALIZADOR`)
+  - confirmar inclusão
+- O CRUD geral deve operar somente sobre usuários já registrados no banco local.
+- O cadastro local deve manter o `CN` atualizado a cada login LDAP bem-sucedido.
+- A recuperação do nome do usuário no painel administrativo não deve depender de recomposição a partir do siape; deve usar o valor já persistido após a sincronização LDAP.
+
+### Painel Próprio de Inventários Autorizados
+
+- Usuários comuns devem visualizar apenas os inventários para os quais possuem autorização explícita.
+- A listagem deve ficar em painel próprio (ex.: "Meus Inventários").
+- Inventários não autorizados não devem aparecer na listagem nem ser acessíveis por URL direta.
+
+### Layout da Tela Pós-Login (Meus Inventários)
+
+- A tela de listagem de inventários deve reutilizar o mesmo cabeçalho visual do dashboard, contendo:
+  - `Campus Inventory`
+  - `Sistema de Conferência de Patrimônio`
+  - ação `[Sair]` no canto direito
+- O acesso ao inventário deve ocorrer pelo clique no card completo (área inteira clicável), e não por botão interno de "acessar".
+- Deve existir ação explícita `Criar novo inventário` visível para perfil com permissão de criação (ADMIN global e/ou ADMIN_CICLO conforme política).
+
+### Criação e Gestão de Inventário
+
+- O botão `Criar novo inventário` deve abrir a tela de gestão/criação de inventário.
+- A tela de gestão deve permitir informar, no mínimo:
+  - nome do inventário
+  - servidor responsável principal (dono do inventário)
+  - fonte da carga inicial:
+    - reutilizar inventário finalizado existente no banco, ou
+    - upload de planilha XLSX no formato institucional
+  - data de início
+  - data de término
+  - usuários adicionais com acesso ao inventário e seus perfis
+- A tela deve validar obrigatoriedade e consistência dos campos (ex.: fim não pode ser anterior ao início).
+
+### Importação de Portaria da Comissão (PDF)
+
+- A tela de criação de inventário deve permitir upload de PDF da portaria de comissão para gerar prévia de preenchimento.
+- A identificação de membros na portaria deve extrair `nome + matrícula SIAPE` por linha de texto.
+- A resolução no Active Directory deve priorizar o SIAPE entre parênteses e aceitar apenas correspondência única.
+- A busca de SIAPE no AD deve considerar identificadores exatos equivalentes (`employeeID`, `sAMAccountName`, `uid`) mantendo validação de unicidade.
+- O responsável do inventário deve seguir a regra:
+  - usar a indicação explícita da portaria (ex.: presidente/responsável/coordenador), quando existir
+  - se não houver declaração clara, usar o primeiro nome válido extraído como responsável
+- A importação deve ser em duas etapas: `prévia` e `confirmação explícita`.
+- Ao confirmar a importação, a prévia deve ser fechada e os dados devem ser aplicados no formulário (`responsável` e `membros`).
+- Se não houver dados válidos para aplicar, o sistema deve informar claramente e não sinalizar sucesso enganoso.
+
+### Aba de Permissões no Inventário (Admin do Inventário)
+
+- Em cada inventário, usuários com perfil `ADMIN_CICLO` devem visualizar abas administrativas adicionais, incluindo **Permissões**.
+- A aba de permissões deve permitir:
+  - buscar usuário por `siape`, `cpf` ou `nome`
+  - validar primeiro no banco local de usuários
+  - se não existir no banco, consultar Active Directory
+  - ao confirmar inclusão, persistir o usuário no banco local e conceder permissão no inventário
+  - remover usuário do inventário
+  - ajustar nível de acesso para somente visualização (`VISUALIZADOR`), sem permitir alterações
+
+### Administração de Situação do Inventário
+
+- Na área administrativa do inventário (aba de permissões ou aba de configurações), o `ADMIN_CICLO` deve conseguir:
+  - alterar nome do inventário
+  - alterar estado operacional do inventário conforme regras de transição
+  - registrar histórico de alteração (quem alterou, quando, de qual estado para qual estado)
+
+### Estrutura de Telas para Ciclos
+
+- **Tela Meus Inventários**: exibe somente inventários autorizados ao usuário logado.
+- **Tela de Inventários**: lista de ciclos com filtros por campus, status e período.
+- **Tela de Criação de Ciclo**: wizard com identificação, campus, fonte de dados e usuários permitidos.
+- **Tela de Gestão do Ciclo**: painel com progresso, ações de mudança de estado e configuração.
+- **Tela de Usuários do Ciclo**: adicionar/remover participantes e ajustar perfis.
+- **Tela de Gestão Global de Usuários**: listar usuários locais e gerenciar vínculos por inventário no card do usuário.
+- **Tela de Auditoria do Ciclo**: revisão de não localizados, histórico e fechamento.
+
+#### Comportamentos obrigatórios da Tela Meus Inventários
+
+- ADMIN visualiza todos os inventários.
+- Usuário comum visualiza apenas inventários autorizados.
+- Card inteiro é clicável para seleção do inventário ativo.
+- Deve haver CTA para criação de novo inventário.
 
 ## 🔄 Fluxo de Conferência
+
+> Todas as operações abaixo devem sempre considerar o **ciclo ativo selecionado**.
 
 ### 1. Seleção de Espaço
 
 - Lista de espaços `isActive=true AND isFinalized=false`
-- **Busca no header**: Campo com debounce 300ms para filtrar por nome, responsável ou setor
+- **Busca no header**: Campo com debounce 300ms para filtrar por nome do espaço
 - Atalho `Ctrl+K` foca na busca
 - Clique no card navega para `/room/[spaceId]`
+- Quando o usuário for **ADMINISTRADOR**, cada card de espaço exibe apenas uma ação de edição flutuante:
+  - `✏️` no canto superior direito do card ao passar o mouse sobre a sala
+- A ação `📝 Novo espaço` fica fora do card, logo após o componente de busca do header
+
+### 1.1 Organização do Dashboard por Abas/Seções do Inventário
+
+- A região inferior do dashboard (informações do inventário e conteúdo operacional) deve concentrar ações administrativas em formato de abas ou botões de seção.
+- O acesso de auditoria deve ser movido para essa região (não como botão solto no topo), preferencialmente em aba `Auditoria`.
+- Além de `Auditoria`, deve existir:
+  - aba/seção `Permissões` (gestão de servidores com acesso)
+  - aba/seção `Dados` (nome do inventário, responsável, início, fim, status e metadados)
+- A visibilidade das abas administrativas deve respeitar o perfil do usuário no inventário.
+- A caixa de acesso às abas, posicionada ao final da lista de espaços, deve ser unificada com a própria caixa de conteúdo das abas.
+- A navegação das abas e o conteúdo da aba ativa devem existir no mesmo container visual (header de abas + painel), evitando caixas separadas para acesso e exibição.
+- O container de abas deve priorizar flexibilidade de acesso:
+  - desktop: navegação horizontal por abas com troca imediata de conteúdo
+  - mobile: navegação adaptável (scroll horizontal ou seletor) sem perder acesso às ações administrativas
+  - manter contexto da lista de espaços sem exigir rolagem excessiva entre o seletor e o conteúdo da aba ativa
 
 ### 2. Tela de Conferência
 
@@ -34,7 +214,7 @@ Aplicação web colaborativa para mapeamento físico de inventário patrimonial 
 │ [🔍 Buscar espaços...] [👤 User] [Sair] │ ← Header fixo
 ├─────────────────────────────────────────────────┤
 │ 🏢 LABORATÓRIO E06 │
-│ Responsável: JADIELSON • 45 itens • 67% conferido│
+│ Responsável: JADIELSON • 45 itens visíveis • 67% conferido│
 │ [████████████░░░░░░░░░░░░░░░░░░] Progress Bar │
 ├─────────────────────────────────────────────────┤
 │ [➕ Patrimônio não listado: ______] [Buscar] │ ← Input manual
@@ -109,6 +289,12 @@ Aplicação web colaborativa para mapeamento físico de inventário patrimonial 
   - Move para fila de revisão (acessível por ADMIN)
   - Bloqueia edições até reabertura
 
+### 9. Consistência de Quantitativo
+
+- O quantitativo exibido no card do dashboard deve refletir a mesma regra de listagem usada dentro da sala.
+- Se um item não aparece na lista da sala, ele não deve ser contado como item visível no card.
+- Qualquer ajuste de filtro na sala deve ser espelhado na origem da contagem do dashboard.
+
 ## 🔄 Fluxo de Remoção e Realocação (Sem Aprovação)
 
 ### Princípios
@@ -173,6 +359,10 @@ Operações:
 ✅ Editar nome/responsável de espaço existente
 ✅ Desativar espaço (isActive=false) — só se count(items) === 0
 
+No card de espaços (dashboard):
+✅ ADMIN pode alterar o nome do espaço existente via botão flutuante `✏️`
+✅ ADMIN pode criar novo espaço via botão `📝` fora do card, logo após a busca
+
 Validações:
 Nome único (case-insensitive)
 Não permitir exclusão física (soft-delete apenas)
@@ -224,25 +414,47 @@ Local inicial: COORDENADORIA DE ALMOXARIFADO
 
 Importação (Seed Inicial)
 Script seed-xlsx.js lê o arquivo e popula o banco mantendo:
-100% das colunas originais preservadas nos campos do model Item
-Mapeamento direto: você digita a sala → Space.name → Item.spaceId
-Valores de Encontrado (sim/não) → statusEncontrado (SIM/NAO)
-Botões visuais de conservação mapeiam para: Ótimo→EXCELENTE, Regular→BOM, Ruim→INSERVÍVEL
+100% das colunas esperadas preservadas nos campos do model Item
+
+Formato esperado pelo importador da carga inicial (ordem de cabeçalhos):
+
+unidade
+setor
+responsavel
+codigo
+descricao
+valor
+condicao
+fornecedor
+cnpj_fornecedor
+catalogo
+codigo_sia
+descricao_sia
+patrimonio
+numero_entrada
+data_entrada
+data_aquisicao
+documento
+data_documento
+tipo_aquisicao
+
+Regras de compatibilidade:
+
+- Esses cabeçalhos são obrigatórios para upload de nova carga.
+- Colunas acessórias não listadas acima não devem ser exigidas pelo importador.
+- O sistema deve permitir mapear sala/espaço por regra de negócio do ciclo (ex.: campo adicional configurado no wizard).
+
 Exportação (Relatórios)
 Exportação padrão (/api/export/xlsx):
-Gera arquivo idêntico ao original em estrutura de colunas
-Inclui apenas itens com statusEncontrado IN (SIM, NAO) aprovados
-Atualiza colunas de conferência: Encontrado, 1/20/26, Hugo Martins..., condicao
+Gera arquivo compatível com a estrutura oficial esperada
+Inclui itens do ciclo selecionado conforme regras de status e auditoria
 Exportação de auditoria (/api/export/audit-xlsx):
 Inclui colunas adicionais para rastreabilidade
 Disponível apenas para perfis ADMIN ou REVISOR
-Colunas do inventario.xlsx (Referência)
 
-unidade | setor | responsavel | codigo | descricao | valor | condicao |
-fornecedor | cnpj_fornecedor | catalogo | codigo_sia | descricao_sia |
-patrimonio | numero_entrada | data_entrada | data_aquisicao | documento |
-data_documento | tipo_aquisicao | você digita a sala | (estado) |
-Encontrado | 1/20/26 | Hugo Martins de Carvalho | não_listado
+Observação:
+
+- Colunas históricas de planilhas antigas (por exemplo colunas acessórias de conferência manual) não são parte do contrato obrigatório do importador.
 
 ## 🎨 Padrões de UI/UX
 
@@ -313,7 +525,6 @@ shadow-lg ring-2 ring-blue-200
 
 ## 🚫 Fora de Escopo (v1)
 
-Upload de planilhas via interface (carga inicial via script CLI)
 Geração automática de QR Code/Etiquetas
 Integração direta com SIA/Patrimônio.gov.br
 Controle de empréstimo/saída temporária de itens
@@ -323,12 +534,28 @@ Relatórios de Business Intelligence avançados
 ## 📋 Critérios de Aceite do MVP
 
 Login LDAP funciona com usuário real da instituição
+É possível criar múltiplos ciclos de inventário (N verificações)
+Novo ciclo permite escolher entre reutilizar ciclo finalizado ou upload XLSX
+Upload XLSX valida obrigatoriamente os 19 cabeçalhos esperados
+Cada ciclo possui campus e lista de usuários permitidos
+Usuário comum visualiza apenas inventários autorizados em painel próprio
+Tela de inventários reutiliza cabeçalho padrão do dashboard (`Campus Inventory`, subtítulo institucional e ação `Sair`)
+Seleção de inventário ocorre por clique no card inteiro
+Existe ação de `Criar novo inventário` levando à tela de gestão
+Tela de gestão de inventário permite definir nome, dono, fonte inicial, datas e usuários com acesso
+Usuário sem permissão não acessa inventário por URL direta
+ADMIN_CICLO consegue adicionar/remover usuários no inventário
+Busca de usuários em permissões aceita siape/cpf/nome e consulta banco + AD quando necessário
+Perfil VISUALIZADOR consegue acessar sem editar dados dos ambientes
+ADMIN_CICLO consegue alterar nome e status operacional do inventário
+Estados do ciclo funcionam: Não iniciado, Pausado, Em Auditoria, Finalizado, Cancelado
+Dashboard organiza ações de inventário em abas/seções incluindo `Auditoria`, `Permissões` e `Dados`
 Busca de espaços no header filtra em tempo real (debounce 300ms)
 Card de item expande/colapsa com clique no corpo
 Botões de conservação atualizam condicaoVisual com auto-save
 Realocação move item imediatamente e notifica via toast
 Itens "Não Localizados" aparecem no painel de auditoria com lastro
-Exportação gera arquivo compatível com inventario.xlsx original
+Exportação gera arquivo compatível com o formato oficial esperado
 Nenhum window.alert() ou window.confirm() é usado na interface
 App funciona em mobile (PWA responsivo) e offline básico
 

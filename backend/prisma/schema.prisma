@@ -15,29 +15,91 @@ model User {
   role           String   @default("CONFERENTE")
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  inventoriesCreated Inventory[] @relation("InventoryCreatedBy")
+  inventoryLinks     InventoryUser[]
   
   @@map("users")
+}
+
+model Inventory {
+  id             String   @id @default(cuid())
+  name           String
+  campus         String?
+  sourceType     String   @default("UPLOAD_XLSX")
+  statusOperacao String   @default("NAO_INICIADO")
+  baseInventoryId String?
+  baseInventory  Inventory? @relation("InventoryBase", fields: [baseInventoryId], references: [id], onDelete: SetNull)
+  derivedInventories Inventory[] @relation("InventoryBase")
+  createdById    String?
+  createdBy      User?    @relation("InventoryCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  spaces         Space[]
+  items          Item[]
+  users          InventoryUser[]
+  statusHistory  InventoryStatusHistory[]
+
+  @@map("inventories")
+}
+
+model InventoryStatusHistory {
+  id          String    @id @default(cuid())
+  inventoryId String
+  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  fromStatus  String
+  toStatus    String
+  changedBy   String
+  changedAt   DateTime  @default(now())
+
+  @@index([inventoryId, changedAt])
+  @@map("inventory_status_history")
+}
+
+model InventoryUser {
+  id          String   @id @default(cuid())
+  inventoryId String
+  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        String   @default("CONFERENTE")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([inventoryId, userId])
+  @@index([userId])
+  @@index([inventoryId])
+  @@map("inventory_users")
 }
 
 model Space {
   id            String     @id @default(cuid())
   name          String
   responsible   String
+  sector        String?
+  unit          String?
+  inventoryId   String?
+  inventory     Inventory? @relation(fields: [inventoryId], references: [id], onDelete: SetNull)
   isActive      Boolean    @default(true)
   isFinalized   Boolean    @default(false)
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   
   items         Item[]
+  lastKnownItems Item[]    @relation("ItemLastKnownSpace")
   relocationOut Relocation[] @relation("RelocationSource")
   relocationIn  Relocation[] @relation("RelocationTarget")
+  historyFrom   ItemHistorico[] @relation("HistoricoFromSpace")
+  historyTo     ItemHistorico[] @relation("HistoricoToSpace")
   
   @@map("spaces")
 }
 
 model Item {
   id                String     @id @default(cuid())
-  patrimonio        String     @unique
+  patrimonio        String
   descricao         String
   valor             Float?
   condicaoOriginal  String
@@ -52,10 +114,14 @@ model Item {
   documento         String?
   dataDocumento     DateTime?  @map("data_documento")
   tipoAquisicao     String?    @map("tipo_aquisicao")
+  inventoryId       String?
+  inventory         Inventory? @relation(fields: [inventoryId], references: [id], onDelete: SetNull)
   
   // Dados da conferência
   spaceId           String
   space             Space      @relation(fields: [spaceId], references: [id])
+  lastKnownSpaceId  String?
+  lastKnownSpace    Space?     @relation("ItemLastKnownSpace", fields: [lastKnownSpaceId], references: [id], onDelete: SetNull)
   
   statusEncontrado  String     @default("NAO") @map("Encontrado")
   condicaoVisual    String?
@@ -64,11 +130,34 @@ model Item {
   
   // Relocações
   relocationIn      Relocation? @relation("ItemRelocation")
+  history           ItemHistorico[]
   
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
+
+  @@unique([inventoryId, patrimonio])
   
   @@map("items")
+}
+
+model ItemHistorico {
+  id          String   @id @default(cuid())
+  itemId      String
+  item        Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  fromSpaceId String?
+  fromSpace   Space?   @relation("HistoricoFromSpace", fields: [fromSpaceId], references: [id], onDelete: SetNull)
+
+  toSpaceId   String?
+  toSpace     Space?   @relation("HistoricoToSpace", fields: [toSpaceId], references: [id], onDelete: SetNull)
+
+  action      String
+  reason      String?
+  createdBy   String
+  metadata    String?
+  createdAt   DateTime @default(now())
+
+  @@map("item_history")
 }
 
 model Relocation {
