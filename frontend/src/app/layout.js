@@ -8,6 +8,11 @@ export const metadata = {
     template: "%s | Campus Inventory",
   },
   description: "Sistema de conferência de patrimônio do Campus Aracruz.",
+  icons: {
+    icon: "/ifes.ico",
+    shortcut: "/ifes.ico",
+    apple: "/ifes.ico",
+  },
 };
 
 export default function RootLayout({ children }) {

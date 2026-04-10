@@ -408,6 +408,63 @@ router.post(
 );
 
 router.post(
+  "/uncheck",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const { itemId } = req.body;
+      const user = req.user;
+
+      const item = await prisma.item.findUnique({
+        where: { id: itemId },
+        select: {
+          id: true,
+          spaceId: true,
+          inventoryId: true,
+          statusEncontrado: true,
+        },
+      });
+
+      if (!item || item.inventoryId !== req.inventoryId) {
+        return res.status(404).json({ error: "Item não encontrado" });
+      }
+
+      if (item.statusEncontrado !== "SIM") {
+        return res.status(400).json({
+          error: "Somente itens marcados como encontrados podem ser desfeitos",
+        });
+      }
+
+      await prisma.item.updateMany({
+        where: { id: itemId, inventoryId: req.inventoryId },
+        data: {
+          statusEncontrado: "PENDENTE",
+          condicaoVisual: null,
+          dataConferencia: null,
+          ultimoConferente: null,
+        },
+      });
+
+      await recordItemHistory(prisma, {
+        itemId,
+        fromSpaceId: item.spaceId,
+        toSpaceId: item.spaceId,
+        action: "DESFEITO_ENCONTRADO",
+        createdBy: user.sub,
+      });
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Error undoing item check:", err);
+      res.status(500).json({ error: "Erro ao desfazer item encontrado" });
+    }
+  },
+);
+
+router.post(
   "/:itemId/restore",
   verifyJWT,
   requireInventoryAccess(),
@@ -420,7 +477,11 @@ router.post(
 
       const item = await prisma.item.findUnique({
         where: { id: itemId },
-        select: { lastKnownSpaceId: true, inventoryId: true },
+        select: {
+          spaceId: true,
+          lastKnownSpaceId: true,
+          inventoryId: true,
+        },
       });
 
       if (!item || item.inventoryId !== req.inventoryId) {
@@ -439,7 +500,8 @@ router.post(
 
       await recordItemHistory(prisma, {
         itemId,
-        fromSpaceId: item.lastKnownSpaceId,
+        fromSpaceId: item.spaceId,
+        toSpaceId: item.lastKnownSpaceId || item.spaceId,
         action: "ESTORNADO",
         createdBy: user.sub,
       });

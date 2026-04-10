@@ -11,6 +11,34 @@ import { useToast } from "../../../components/Toast/toastContext";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 
+const HISTORY_ACTION_CONFIG = {
+  ENCONTRADO: {
+    label: "Encontrado",
+    badgeClass: "bg-blue-100 text-blue-700",
+    defaultDirection: "INTERNO",
+  },
+  NAO_LOCALIZADO: {
+    label: "Não localizado",
+    badgeClass: "bg-rose-100 text-rose-700",
+    defaultDirection: "SAIDA",
+  },
+  REALOCADO: {
+    label: "Realocado",
+    badgeClass: "bg-violet-100 text-violet-700",
+    defaultDirection: "INTERNO",
+  },
+  ESTORNADO: {
+    label: "Realocação desfeita",
+    badgeClass: "bg-orange-100 text-orange-700",
+    defaultDirection: "SAIDA",
+  },
+  DESFEITO_ENCONTRADO: {
+    label: "Encontrado desfeito",
+    badgeClass: "bg-orange-100 text-orange-700",
+    defaultDirection: "INTERNO",
+  },
+};
+
 export default function RoomPage() {
   const params = useParams();
   const router = useRouter();
@@ -26,7 +54,7 @@ export default function RoomPage() {
   const [relocateModal, setRelocateModal] = useState(null); // { itemId, currentSpace }
   const [spaces, setSpaces] = useState([]);
   const [saving, setSaving] = useState(false);
-  const [showAddPatrimonio, setShowAddPatrimonio] = useState(false);
+  const [quickActionMode, setQuickActionMode] = useState("single");
   const [searchTerm, setSearchTerm] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
@@ -51,6 +79,8 @@ export default function RoomPage() {
   const [batchPreview, setBatchPreview] = useState(null);
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
+  const [showFoundItems, setShowFoundItems] = useState(true);
+  const [showRelocatedItems, setShowRelocatedItems] = useState(true);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -121,6 +151,68 @@ export default function RoomPage() {
     return "bg-slate-100 text-slate-700";
   };
 
+  const getActionLabel = (action) => {
+    return HISTORY_ACTION_CONFIG[action]?.label || action || "Atualização";
+  };
+
+  const getActionBadgeClass = (action) => {
+    return (
+      HISTORY_ACTION_CONFIG[action]?.badgeClass || "bg-slate-100 text-slate-700"
+    );
+  };
+
+  const prependMovementEntry = useCallback(
+    (entry) => {
+      setMovementHistory((prev) =>
+        [entry, ...prev].slice(0, movementPagination.limit),
+      );
+      setMovementPagination((prev) => ({
+        ...prev,
+        total: (prev.total || 0) + 1,
+        totalPages: Math.max(
+          Math.ceil(((prev.total || 0) + 1) / (prev.limit || 20)),
+          1,
+        ),
+      }));
+    },
+    [movementPagination.limit],
+  );
+
+  const registerLocalHistoryAction = useCallback(
+    ({
+      action,
+      item,
+      direction,
+      fromSpaceName,
+      toSpaceName,
+      reason = null,
+    }) => {
+      if (!item?.id) return;
+
+      const resolvedDirection =
+        direction ||
+        HISTORY_ACTION_CONFIG[action]?.defaultDirection ||
+        "INTERNO";
+
+      prependMovementEntry({
+        id: `local-${action?.toLowerCase?.() || "update"}-${item.id}-${Date.now()}`,
+        itemId: item.id,
+        patrimonio: item.patrimonio,
+        descricao: item.descricao,
+        action,
+        direction: resolvedDirection,
+        fromSpaceName:
+          fromSpaceName === undefined ? space?.name || null : fromSpaceName,
+        toSpaceName:
+          toSpaceName === undefined ? space?.name || null : toSpaceName,
+        createdBy: user?.fullName || user?.sub || "Usuário",
+        createdAt: new Date().toISOString(),
+        reason,
+      });
+    },
+    [prependMovementEntry, space?.name, user?.fullName, user?.sub],
+  );
+
   useEffect(() => {
     const timer = setTimeout(() => {
       setRelocateSearchTerm(relocateSearchInput.trim().toLowerCase());
@@ -144,6 +236,24 @@ export default function RoomPage() {
       );
     });
   }, [relocateSearchTerm, spaceId, spaces]);
+
+  const filteredItems = useMemo(() => {
+    return items.filter((item) => {
+      if (!showFoundItems && item.statusEncontrado === "SIM") return false;
+      if (!showRelocatedItems && item.meta?.isRelocated) return false;
+      return true;
+    });
+  }, [items, showFoundItems, showRelocatedItems]);
+
+  const foundItemsCount = useMemo(
+    () => items.filter((item) => item.statusEncontrado === "SIM").length,
+    [items],
+  );
+
+  const relocatedItemsCount = useMemo(
+    () => items.filter((item) => item.meta?.isRelocated).length,
+    [items],
+  );
 
   const loadData = async (token, inventoryId) => {
     try {
@@ -172,6 +282,8 @@ export default function RoomPage() {
       setSaving(true);
       autoSave(() => {
         const inventoryId = localStorage.getItem("activeInventoryId");
+        const itemBeforeUpdate = items.find((i) => i.id === itemId);
+
         enqueueAction({
           endpoint: "/items/check",
           method: "POST",
@@ -191,10 +303,18 @@ export default function RoomPage() {
               : i,
           ),
         );
+
+        if (itemBeforeUpdate) {
+          registerLocalHistoryAction({
+            action: "ENCONTRADO",
+            item: itemBeforeUpdate,
+          });
+        }
+
         setSaving(false);
       });
     },
-    [autoSave],
+    [autoSave, items, registerLocalHistoryAction],
   );
 
   const handleRelocate = useCallback(
@@ -317,7 +437,6 @@ export default function RoomPage() {
         prev.filter((result) => result.id !== pendingMoveCandidate.id),
       );
       setSearchTerm("");
-      setShowAddPatrimonio(false);
       setPendingMoveCandidate(null);
       setSaving(false);
       showToast({
@@ -335,16 +454,25 @@ export default function RoomPage() {
   const handleUnfoundItem = () => {
     if (!pendingUnfoundItem) return;
 
+    const itemToRemove = pendingUnfoundItem;
+
     enqueueAction({
       endpoint: "/items/unfound",
       method: "POST",
       payload: {
-        itemId: pendingUnfoundItem.id,
+        itemId: itemToRemove.id,
         inventoryId: localStorage.getItem("activeInventoryId"),
       },
     });
 
-    setItems((prev) => prev.filter((i) => i.id !== pendingUnfoundItem.id));
+    setItems((prev) => prev.filter((i) => i.id !== itemToRemove.id));
+
+    registerLocalHistoryAction({
+      action: "NAO_LOCALIZADO",
+      item: itemToRemove,
+      toSpaceName: null,
+    });
+
     setPendingUnfoundItem(null);
     setRelocateModal(null);
 
@@ -356,7 +484,7 @@ export default function RoomPage() {
     });
   };
 
-  const handleBatchPreview = async () => {
+  const validateBatchFields = () => {
     const patrimonioInicial = batchStartPatrimonio.trim();
     const patrimonioFinal = batchEndPatrimonio.trim();
 
@@ -366,8 +494,26 @@ export default function RoomPage() {
         title: "Intervalo incompleto",
         message: "Informe patrimônio inicial e final para gerar a prévia.",
       });
-      return;
+      return null;
     }
+
+    if (!/\d/.test(patrimonioInicial) || !/\d/.test(patrimonioFinal)) {
+      showToast({
+        type: "warning",
+        title: "Intervalo inválido",
+        message: "Informe patrimônios válidos contendo números.",
+      });
+      return null;
+    }
+
+    return { patrimonioInicial, patrimonioFinal };
+  };
+
+  const handleBatchPreview = async () => {
+    const validated = validateBatchFields();
+    if (!validated) return;
+
+    const { patrimonioInicial, patrimonioFinal } = validated;
 
     try {
       setBatchLoading(true);
@@ -411,8 +557,10 @@ export default function RoomPage() {
   };
 
   const handleBatchConfirm = async () => {
-    const patrimonioInicial = batchStartPatrimonio.trim();
-    const patrimonioFinal = batchEndPatrimonio.trim();
+    const validated = validateBatchFields();
+    if (!validated) return;
+
+    const { patrimonioInicial, patrimonioFinal } = validated;
 
     try {
       setBatchLoading(true);
@@ -455,12 +603,15 @@ export default function RoomPage() {
   };
 
   const handleUndoLastAction = async (item) => {
-    if (!item?.meta?.isRelocated) {
+    const canUndoRelocation = Boolean(item?.meta?.isRelocated);
+    const canUndoFound = item?.statusEncontrado === "SIM";
+
+    if (!canUndoRelocation && !canUndoFound) {
       showToast({
         type: "warning",
         title: "Ação indisponível",
         message:
-          "Desfazer está disponível apenas para itens realocados pendentes.",
+          "Desfazer está disponível apenas para itens encontrados ou realocados.",
       });
       return;
     }
@@ -469,22 +620,68 @@ export default function RoomPage() {
       setSaving(true);
       const token = localStorage.getItem("token");
       const inventoryId = localStorage.getItem("activeInventoryId");
-      await axios.post(
-        `${API}/items/${item.id}/restore`,
-        { inventoryId },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
 
-      setItems((prev) => prev.filter((i) => i.id !== item.id));
-      setExpandedItem((prev) => (prev === item.id ? null : prev));
+      if (canUndoFound) {
+        await axios.post(
+          `${API}/items/uncheck`,
+          { itemId: item.id, inventoryId },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        );
 
-      showToast({
-        type: "success",
-        title: "Ação desfeita",
-        message: "A realocação pendente foi revertida com sucesso.",
-      });
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === item.id
+              ? {
+                  ...i,
+                  statusEncontrado: "PENDENTE",
+                  condicaoVisual: null,
+                  dataConferencia: null,
+                  ultimoConferente: null,
+                }
+              : i,
+          ),
+        );
+
+        registerLocalHistoryAction({
+          action: "DESFEITO_ENCONTRADO",
+          item,
+        });
+
+        showToast({
+          type: "success",
+          title: "Encontrado desfeito",
+          message: "A confirmação de encontrado foi removida com sucesso.",
+        });
+        return;
+      }
+
+      if (canUndoRelocation) {
+        await axios.post(
+          `${API}/items/${item.id}/restore`,
+          { inventoryId },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        );
+
+        setItems((prev) => prev.filter((i) => i.id !== item.id));
+        setExpandedItem((prev) => (prev === item.id ? null : prev));
+
+        registerLocalHistoryAction({
+          action: "ESTORNADO",
+          item,
+          toSpaceName: item.meta?.fromSpaceName || null,
+        });
+
+        showToast({
+          type: "success",
+          title: "Ação desfeita",
+          message: "A realocação pendente foi revertida com sucesso.",
+        });
+        return;
+      }
     } catch (err) {
       showToast({
         type: "error",
@@ -512,6 +709,7 @@ export default function RoomPage() {
             100,
         )
       : 0;
+  const hasStateFilters = !showFoundItems || !showRelocatedItems;
 
   return (
     <div className="min-h-screen bg-gray-50 pb-20">
@@ -574,7 +772,7 @@ export default function RoomPage() {
                 : "text-slate-700 hover:bg-slate-100"
             }`}
           >
-            Histórico de movimentações
+            Histórico de atualizações
           </button>
         </div>
 
@@ -586,6 +784,7 @@ export default function RoomPage() {
                   <tr className="text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                     <th className="px-6 py-4">Nº Patrimônio</th>
                     <th className="px-6 py-4">Descrição</th>
+                    <th className="px-6 py-4">Atualização</th>
                     <th className="px-6 py-4">Movimento</th>
                     <th className="px-6 py-4">Origem → Destino</th>
                     <th className="px-6 py-4">Responsável</th>
@@ -597,18 +796,18 @@ export default function RoomPage() {
                     <tr>
                       <td
                         className="px-6 py-10 text-center text-sm text-slate-500"
-                        colSpan={6}
+                        colSpan={7}
                       >
-                        Carregando movimentações...
+                        Carregando atualizações...
                       </td>
                     </tr>
                   ) : movementHistory.length === 0 ? (
                     <tr>
                       <td
                         className="px-6 py-10 text-center text-sm text-slate-500"
-                        colSpan={6}
+                        colSpan={7}
                       >
-                        Nenhuma movimentação encontrada para esta sala.
+                        Nenhuma atualização encontrada para esta sala.
                       </td>
                     </tr>
                   ) : (
@@ -619,6 +818,13 @@ export default function RoomPage() {
                         </td>
                         <td className="px-6 py-4 text-sm text-slate-700">
                           {entry.descricao}
+                        </td>
+                        <td className="px-6 py-4 text-sm">
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${getActionBadgeClass(entry.action)}`}
+                          >
+                            {getActionLabel(entry.action)}
+                          </span>
                         </td>
                         <td className="px-6 py-4 text-sm">
                           <span
@@ -649,7 +855,7 @@ export default function RoomPage() {
               <p className="text-sm text-slate-600">
                 Página {movementPagination.page} de{" "}
                 {movementPagination.totalPages} • {movementPagination.total}{" "}
-                movimentações
+                atualizações
               </p>
               <div className="flex gap-2">
                 <button
@@ -689,24 +895,43 @@ export default function RoomPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="font-semibold text-gray-900">
-                  Incluir novo patrimônio
+                  Atualização rápida de patrimônios
                 </h3>
                 <p className="text-sm text-gray-500">
-                  Busque por número ou descrição para mover para esta sala
+                  Inclua um item por busca ou atualize um conjunto por intervalo
+                  com validação.
                 </p>
               </div>
-              <button
-                onClick={() => {
-                  setShowAddPatrimonio((prev) => !prev);
-                  setSearchError("");
-                }}
-                className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700"
-              >
-                {showAddPatrimonio ? "Fechar busca" : "+ Incluir patrimônio"}
-              </button>
+              <div className="inline-flex rounded-lg bg-slate-100 p-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuickActionMode("single");
+                    setSearchError("");
+                  }}
+                  className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                    quickActionMode === "single"
+                      ? "bg-white text-slate-900 shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  Item único
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQuickActionMode("batch")}
+                  className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                    quickActionMode === "batch"
+                      ? "bg-white text-slate-900 shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  Lote por intervalo
+                </button>
+              </div>
             </div>
 
-            {showAddPatrimonio && (
+            {quickActionMode === "single" ? (
               <div className="mt-4 space-y-3">
                 <div className="flex gap-2">
                   <input
@@ -721,7 +946,7 @@ export default function RoomPage() {
                     disabled={searching}
                     className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-black disabled:opacity-50"
                   >
-                    {searching ? "Buscando..." : "Buscar"}
+                    {searching ? "Buscando..." : "Buscar item"}
                   </button>
                 </div>
 
@@ -759,90 +984,137 @@ export default function RoomPage() {
                   </ul>
                 )}
               </div>
+            ) : (
+              <div className="mt-4 space-y-3">
+                <div className="grid gap-3 md:grid-cols-4">
+                  <input
+                    type="text"
+                    value={batchStartPatrimonio}
+                    onChange={(e) => setBatchStartPatrimonio(e.target.value)}
+                    placeholder="Patrimônio inicial"
+                    className="border rounded-lg px-3 py-2"
+                  />
+                  <input
+                    type="text"
+                    value={batchEndPatrimonio}
+                    onChange={(e) => setBatchEndPatrimonio(e.target.value)}
+                    placeholder="Patrimônio final"
+                    className="border rounded-lg px-3 py-2"
+                  />
+                  <select
+                    value={batchCondicao}
+                    onChange={(e) => setBatchCondicao(e.target.value)}
+                    className="border rounded-lg px-3 py-2"
+                  >
+                    <option value="EXCELENTE">🟢 Ótimo</option>
+                    <option value="BOM">🟡 Regular</option>
+                    <option value="INSERVIVEL">🔴 Ruim</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleBatchPreview}
+                    disabled={batchLoading}
+                    className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:opacity-50"
+                  >
+                    {batchLoading ? "Gerando prévia..." : "Pré-visualizar lote"}
+                  </button>
+                </div>
+
+                {batchPreview ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-sm text-slate-700">
+                      Itens no intervalo:{" "}
+                      <strong>{batchPreview.matchedCount || 0}</strong>
+                    </p>
+                    <p className="text-sm text-slate-700">
+                      Itens fora do intervalo/ignorados:{" "}
+                      <strong>{batchPreview.skippedCount || 0}</strong>
+                    </p>
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        disabled={
+                          batchLoading || (batchPreview.matchedCount || 0) === 0
+                        }
+                        onClick={() => setBatchConfirmOpen(true)}
+                        className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+                      >
+                        Confirmar marcação em massa
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             )}
           </div>
         ) : null}
 
         {activeTab === "itens" ? (
           <div className="bg-white rounded-xl shadow p-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h3 className="font-semibold text-gray-900">
-                  Marcar encontrados em massa
-                </h3>
-                <p className="text-sm text-gray-500">
-                  Informe o intervalo de patrimônio para aplicar em lote.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-4 grid gap-3 md:grid-cols-4">
-              <input
-                type="text"
-                value={batchStartPatrimonio}
-                onChange={(e) => setBatchStartPatrimonio(e.target.value)}
-                placeholder="Patrimônio inicial"
-                className="border rounded-lg px-3 py-2"
-              />
-              <input
-                type="text"
-                value={batchEndPatrimonio}
-                onChange={(e) => setBatchEndPatrimonio(e.target.value)}
-                placeholder="Patrimônio final"
-                className="border rounded-lg px-3 py-2"
-              />
-              <select
-                value={batchCondicao}
-                onChange={(e) => setBatchCondicao(e.target.value)}
-                className="border rounded-lg px-3 py-2"
-              >
-                <option value="EXCELENTE">🟢 Ótimo</option>
-                <option value="BOM">🟡 Regular</option>
-                <option value="INSERVIVEL">🔴 Ruim</option>
-              </select>
-              <button
-                type="button"
-                onClick={handleBatchPreview}
-                disabled={batchLoading}
-                className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:opacity-50"
-              >
-                {batchLoading ? "Gerando prévia..." : "Pré-visualizar lote"}
-              </button>
-            </div>
-
-            {batchPreview ? (
-              <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <p className="text-sm text-slate-700">
-                  Itens no intervalo:{" "}
-                  <strong>{batchPreview.matchedCount || 0}</strong>
-                </p>
-                <p className="text-sm text-slate-700">
-                  Itens fora do intervalo/ignorados:{" "}
-                  <strong>{batchPreview.skippedCount || 0}</strong>
-                </p>
-                <div className="mt-3">
-                  <button
-                    type="button"
-                    disabled={
-                      batchLoading || (batchPreview.matchedCount || 0) === 0
-                    }
-                    onClick={() => setBatchConfirmOpen(true)}
-                    className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-800">
+                Filtros de estado dos itens
+              </p>
+              <div className="flex flex-wrap items-center gap-4">
+                <button
+                  type="button"
+                  onClick={() => setShowFoundItems((prev) => !prev)}
+                  aria-pressed={showFoundItems}
+                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium transition ${
+                    showFoundItems
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                      : "border-slate-300 bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  <span>{showFoundItems ? "✓" : "○"}</span>
+                  <span>Encontrados</span>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                      showFoundItems
+                        ? "bg-emerald-200 text-emerald-800"
+                        : "bg-slate-200 text-slate-600"
+                    }`}
                   >
-                    Confirmar marcação em massa
-                  </button>
-                </div>
+                    {foundItemsCount}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowRelocatedItems((prev) => !prev)}
+                  aria-pressed={showRelocatedItems}
+                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium transition ${
+                    showRelocatedItems
+                      ? "border-amber-300 bg-amber-50 text-amber-700"
+                      : "border-slate-300 bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  <span>{showRelocatedItems ? "✓" : "○"}</span>
+                  <span>Movidos</span>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                      showRelocatedItems
+                        ? "bg-amber-200 text-amber-800"
+                        : "bg-slate-200 text-slate-600"
+                    }`}
+                  >
+                    {relocatedItemsCount}
+                  </span>
+                </button>
               </div>
-            ) : null}
+            </div>
           </div>
         ) : null}
 
-        {activeTab === "itens" && items.length === 0 ? (
+        {activeTab === "itens" && filteredItems.length === 0 ? (
           <div className="bg-white p-12 rounded-xl shadow text-center text-gray-500">
-            Nenhum item registrado neste espaço.
+            {items.length === 0
+              ? "Nenhum item registrado neste espaço."
+              : hasStateFilters
+                ? "Nenhum item visível com os filtros selecionados."
+                : "Nenhum item disponível para exibição."}
           </div>
         ) : activeTab === "itens" ? (
-          items.map((item) => {
+          filteredItems.map((item) => {
             const formattedValue =
               item.valor != null
                 ? `R$ ${Number(item.valor).toFixed(2)}`
@@ -850,6 +1122,8 @@ export default function RoomPage() {
             const formattedDataAquisicao = item.dataAquisicao
               ? new Date(item.dataAquisicao).toLocaleDateString("pt-BR")
               : "N/A";
+            const canUndoAction =
+              item?.meta?.isRelocated || item?.statusEncontrado === "SIM";
 
             return (
               <div
@@ -987,8 +1261,8 @@ export default function RoomPage() {
                       </p>
                       <button
                         onClick={() => handleUndoLastAction(item)}
-                        disabled={saving}
-                        className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                        disabled={saving || !canUndoAction}
+                        className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         ↩️ Desfazer
                       </button>

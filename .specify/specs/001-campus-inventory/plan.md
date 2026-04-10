@@ -127,6 +127,7 @@ enum HistoricoAction {
   REALOCADO
   NAO_LOCALIZADO
   ENCONTRADO
+  DESFEITO_ENCONTRADO
   ESTORNADO
   EXCLUIDO
 }
@@ -144,6 +145,9 @@ GET /api/items?spaceId=:id → Retorna itens com status e relocações pendentes
 POST /api/items/check → { itemId, condicao } → Atualiza statusEncontrado=SIM, debounce 1s
 POST /api/items/relocate → { itemId, targetSpaceId } → Cria registro Relocation com flag pendingConfirm
 POST /api/items/unfound → { itemId } → statusEncontrado=NAO, remove da lista ativa
+POST /api/items/uncheck → { itemId } → desfaz encontrado, volta para PENDENTE e registra histórico
+POST /api/items/:itemId/restore → estorna realocação pendente e registra histórico com origem/destino
+GET /api/audit/space-movements → retorna histórico de atualizações por sala (ações + data/hora)
 POST /api/spaces/:id/finalize → Bloqueia espaço, gera log de auditoria
 
 ## 4.1. Contratos de Permissão por Inventário (Fase 11)
@@ -422,6 +426,7 @@ enum HistoricoAction {
   REALOCADO
   NAO_LOCALIZADO
   ENCONTRADO
+  DESFEITO_ENCONTRADO
   ESTORNADO
   EXCLUIDO
 }

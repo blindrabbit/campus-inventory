@@ -246,7 +246,7 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
 [✅ Encontrado] - Sinaiza o item como encontrado (verde) e salva statusEncontrado=SIM
 [➡️ MOVER] - Abre modal de realocação para escolher novo espaço
 [🚫 NÃO LOCALIZADO] - Sinaliza item como não encontrado (vermelho)
-[↩️ DESFAZER] - Reverte última ação, volta ao estado anterior
+[↩️ DESFAZER] - Reverte ações elegíveis (realocação pendente e confirmação de encontrado)
 [➡️ MOVER] - Abre modal de realocação:
 
 - Campo de pesquisa acima de `Selecione um espaço...` para filtrar por nome do espaço e responsável
@@ -262,6 +262,15 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
 | **✅ Encontrado**     | Marca como encontrado na sala atual         | `statusEncontrado=SIM`, `condicaoVisual`, `dataConferencia`, `ultimoConferente`       |
 | **➡️ MOVER**          | Move item para outra sala pré-cadastrada    | Cria `ItemHistorico`, atualiza `spaceId`, notifica sala destino via toast             |
 | **🚫 NÃO LOCALIZADO** | Item sai da lista ativa, entra em auditoria | `statusEncontrado=NAO`, `lastKnownSpaceId`, `ItemHistorico` com ação `NAO_LOCALIZADO` |
+| **↩️ DESFAZER (Encontrado)** | Remove a confirmação de encontrado e volta para pendente | `statusEncontrado=PENDENTE`, limpa dados de conferência, `ItemHistorico` com ação `DESFEITO_ENCONTRADO` |
+| **↩️ DESFAZER (Movimentação)** | Estorna a realocação pendente para a sala de origem | Atualiza `spaceId` para origem, `ItemHistorico` com ação `ESTORNADO` contendo `fromSpaceId` e `toSpaceId` |
+
+### 4.1 Histórico de Atualizações da Sala
+
+- A aba da sala deve ser tratada como **Histórico de atualizações** (não apenas movimentações).
+- O histórico deve listar, no mínimo, as ações: `ENCONTRADO`, `NAO_LOCALIZADO`, `REALOCADO`, `ESTORNADO`, `DESFEITO_ENCONTRADO`.
+- Cada linha deve exibir: patrimônio, descrição, ação padronizada, direção, origem/destino, responsável e data/hora.
+- A marcação de encontrado, não localizado e ações de desfazer devem aparecer imediatamente no histórico da sala (atualização otimista), preservando consistência após sincronização.
 
 ### 5. Realocação em Tempo Real
 
