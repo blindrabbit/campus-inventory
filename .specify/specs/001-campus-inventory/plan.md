@@ -36,11 +36,12 @@ campus-inventory/
 
 ### 2.1 LDAP de Identidade e Sincronização de Nome
 
-- O backend usa bind técnico do AD para qualquer consulta de identidade de usuário.
+- O backend usa bind técnico do AD apenas para provisionamento inicial de usuários ainda não cadastrados localmente e fluxos de importação.
 - O retorno confiável para nome completo vem de uma busca explícita no AD, não de um lookup genérico por login.
 - A resolução validada para o nome do usuário deve consultar o objeto do AD por filtro amplo, considerando `sAMAccountName`, `employeeID`, `uid`, `cn` e `displayName`.
-- O `fullName` persistido localmente deve receber o `CN`/`displayName` retornado pelo AD.
+- O `fullName` persistido localmente deve receber o `CN`/`displayName` retornado pelo AD no primeiro cadastro.
 - O `sAMAccountName` continua sendo o identificador canônico de login; ele não deve substituir o nome de exibição no banco nem na interface.
+- Após o usuário existir localmente, o sistema deve usar apenas a base local para busca e exibição de dados de usuário.
 - Alterações em `LDAP_BIND_USER` e `LDAP_BIND_PASS` exigem recriação do container do backend para entrarem no processo em execução.
 - Para importação de comissão por portaria, a resolução por SIAPE deve aceitar correspondência exata única considerando `employeeID`, `sAMAccountName` e `uid`.
 - Quando a consulta exata por SIAPE retornar atributos incompletos, a estratégia deve enriquecer o registro por busca adicional via `sAMAccountName` para recuperar `CN`/`displayName`.
@@ -148,7 +149,7 @@ POST /api/spaces/:id/finalize → Bloqueia espaço, gera log de auditoria
 ## 4.1. Contratos de Permissão por Inventário (Fase 11)
 
 GET /api/inventories/:inventoryId/permissions → Lista usuários vinculados ao inventário
-GET /api/inventories/:inventoryId/permissions/search?q=... → Busca usuário (banco local primeiro; fallback AD)
+GET /api/inventories/:inventoryId/permissions/search?q=... → Busca usuário (banco local; AD apenas para inclusão inicial de usuário inexistente localmente)
 POST /api/inventories/:inventoryId/permissions → Adiciona vínculo do usuário ao inventário
 PATCH /api/inventories/:inventoryId/permissions/:userId → Atualiza perfil no inventário
 DELETE /api/inventories/:inventoryId/permissions/:userId → Remove vínculo do inventário
@@ -239,7 +240,7 @@ Payload sugerido para listagem (`GET /api/admin/users`):
 ### 4.4.1 Regra de Resolução do CN para o CRUD Geral
 
 - A listagem administrativa deve partir do `fullName` salvo no banco local.
-- Se o `fullName` ainda estiver igual ao `sAMAccountName` após um login LDAP, a próxima sincronização deve consultar o AD e substituir pelo `CN`/`displayName` real.
+- Se o `fullName` local estiver vazio ou inválido no primeiro provisionamento, o sistema deve consultar o AD e persistir o `CN`/`displayName` real.
 - A regra de busca validada usa filtros explícitos no AD e não deve voltar para a abordagem de `findUser` genérica quando o objetivo for recuperar nome de exibição.
 - Caso o AD não devolva `CN`/`displayName`, o sistema deve preservar o último nome local válido em vez de regravar o siape como nome.
 
@@ -261,7 +262,7 @@ Payload sugerido para listagem (`GET /api/admin/users`):
 3. Implementar remoção de badge com exibição de ícone `x` em hover e confirmação por modal.
 4. Implementar ação `add` no card para inclusão do usuário em inventário com escolha de perfil.
 5. Integrar endpoints de vínculo (`POST`, `PATCH`, `DELETE`) com atualização otimista e toasts de sucesso/erro.
-6. Garantir que o login atualize sempre `fullName` local a partir do CN do LDAP.
+6. Garantir que a consulta ao LDAP para `fullName` ocorra apenas no primeiro cadastro, com leituras posteriores exclusivamente da base local.
 
 ## 4.7. Diretriz de UI para Container Único de Abas
 
@@ -329,6 +330,31 @@ Regras obrigatórias:
 - Sem correspondência única: incluir em `unresolvedNames`.
 - Frontend deve aplicar dados somente após confirmação explícita da prévia.
 - Após confirmar, a prévia deve ser fechada para evitar reaplicação acidental.
+
+## 4.10. Contratos de Produtividade na Conferência por Espaço
+
+GET /api/spaces/active → Deve retornar, por espaço, os metadados de status de execução:
+
+- `executionStatus`: `NAO_INICIADO | INICIADO | FINALIZADO`
+- `startedAt`: data/hora do primeiro registro no espaço (`null` quando não iniciado)
+- `startedBy`: nome completo do usuário do primeiro registro (`null` quando não iniciado)
+
+POST /api/items/relocate → Antes da seleção final, frontend deve oferecer busca por destino no modal de mover.
+
+POST /api/items/check-batch → Marca itens como encontrados em massa por intervalo de patrimônio.
+
+- Payload: `{ spaceId, patrimonioInicial, patrimonioFinal, condicaoVisual?, dryRun? }`
+- Regras:
+  - intervalo é inclusivo
+  - atualizar `statusEncontrado=SIM`, `dataConferencia` e `ultimoConferente`
+  - registrar histórico individual por item (`ENCONTRADO`)
+  - quando `dryRun=true`, retornar apenas prévia sem alterar dados
+  - retornar resumo `{ updatedCount, skippedCount, skippedPatrimonios[] }`
+
+Regra de início de execução por espaço:
+
+- No primeiro evento válido (`ENCONTRADO`, `REALOCADO`, `NAO_LOCALIZADO`) do espaço, persistir `startedAt` e `startedBy`.
+- Operação deve ser idempotente: se já iniciado, não sobrescrever dados de início.
 
 ## 5. Key Algorithms & Logic
 
@@ -518,3 +544,27 @@ showToast()
 - [ ] Implementar endpoint `GET /api/admin/unfound-items` com paginação
 - [ ] Criar endpoint `GET /api/items/:id/historico` para timeline
 - [ ] Adicionar exportação de auditoria: `GET /api/export/audit-xlsx`
+
+## 🚀 Fase 11: Otimizações de Movimentação e Conferência em Massa
+
+### Busca no Modal de Mover Item
+
+- [x] Inserir campo de pesquisa acima de `Selecione um espaço...` no modal de realocação
+- [x] Filtrar lista de espaços por nome e responsável com debounce (200-300ms)
+- [x] Exibir estado vazio quando não houver espaços compatíveis
+
+### Sinalizador de Status nos Cards de Espaço
+
+- [x] Exibir badge por card com três estados:
+  - [x] `🔴 Não iniciado`
+  - [x] `🟠 Iniciado em DD/MM/AA por <Nome do usuário>`
+  - [x] `🟢 Finalizado`
+- [x] Definir status `Iniciado` no primeiro registro do espaço (`encontrado`, `mover`, `não localizado`)
+- [x] Persistir e exibir data e usuário do primeiro registro sem sobrescrever em ações futuras
+
+### Encontrado em Massa para Biblioteca e Salas
+
+- [x] Criar ação de marcação em massa por intervalo de patrimônio
+- [x] Permitir pré-visualização da quantidade de itens afetados antes de confirmar
+- [x] Aplicar atualização em lote com trilha de auditoria por item
+- [x] Tratar patrimônios fora do intervalo existente sem falhar a operação inteira

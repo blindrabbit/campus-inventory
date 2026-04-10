@@ -6,7 +6,6 @@ import {
   requireInventoryWriteAccess,
 } from "../middleware/inventory.js";
 import { prisma } from "../prisma/client.js";
-import { resolveUserCn } from "../services/ldap.js";
 
 const router = Router();
 
@@ -28,12 +27,33 @@ async function buildResponsibleLabels(spaces) {
 
   const labels = new Map();
 
-  await Promise.all(
-    uniqueResponsible.map(async (responsible) => {
-      const cn = await resolveUserCn(responsible);
-      labels.set(responsible, cn || responsible);
-    }),
+  if (uniqueResponsible.length === 0) {
+    return labels;
+  }
+
+  const localUsers = await prisma.user.findMany({
+    where: {
+      samAccountName: {
+        in: uniqueResponsible,
+      },
+    },
+    select: {
+      samAccountName: true,
+      fullName: true,
+    },
+  });
+
+  const localMap = new Map(
+    localUsers.map((user) => [
+      user.samAccountName?.toLowerCase(),
+      user.fullName || user.samAccountName,
+    ]),
   );
+
+  uniqueResponsible.forEach((responsible) => {
+    const localName = localMap.get(responsible.toLowerCase());
+    labels.set(responsible, localName || responsible);
+  });
 
   return labels;
 }
@@ -93,6 +113,11 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
     const responsibleLabels = await buildResponsibleLabels(spaces);
 
     const formatted = spaces.map((s) => ({
+      executionStatus: s.isFinalized
+        ? "FINALIZADO"
+        : s.startedAt
+          ? "INICIADO"
+          : "NAO_INICIADO",
       id: s.id,
       name: s.name,
       responsible: s.responsible,
@@ -106,6 +131,8 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
       unit: s.unit,
       itemCount: s._count.items,
       isFinalized: s.isFinalized,
+      startedAt: s.startedAt,
+      startedBy: s.startedBy,
     }));
 
     res.json(formatted);

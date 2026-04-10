@@ -200,7 +200,7 @@ export default function NewInventoryPage() {
       showToast({
         type: "warning",
         title: "Arquivo obrigatório",
-        message: "Selecione um arquivo XLSX para criação por upload.",
+        message: "Selecione um arquivo XLSX ou PDF para criação por upload.",
       });
       return;
     }
@@ -233,6 +233,60 @@ export default function NewInventoryPage() {
       const { data } = await axios.post(`${API}/inventories`, payload, {
         headers: { Authorization: `Bearer ${token}` },
       });
+
+      const importSummary = data?.importSummary;
+      if (
+        form.dataSource === "UPLOAD_XLSX" &&
+        importSummary &&
+        typeof importSummary.totalItemsRegistered === "number"
+      ) {
+        const knownLocationCount = Object.keys(
+          importSummary.locationTotalsKnown || {},
+        ).length;
+        const failureCount = Array.isArray(importSummary.failures)
+          ? importSummary.failures.length
+          : 0;
+
+        showToast({
+          type: "info",
+          title: "Resumo da leitura do arquivo",
+          message: `Itens registrados: ${importSummary.totalItemsRegistered}. Localizações conhecidas: ${knownLocationCount}. Itens sem localização conhecida: ${importSummary.unknownLocationCount || 0}. Falhas reportadas: ${failureCount}.`,
+        });
+
+        const topLocations = Object.entries(
+          importSummary.locationTotalsKnown || {},
+        )
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([location, count]) => `${location}: ${count}`)
+          .join(" | ");
+
+        if (topLocations) {
+          showToast({
+            type: "info",
+            title: "Totais por localização",
+            message: topLocations,
+          });
+        }
+
+        const parseWarningFailure = Array.isArray(importSummary.failures)
+          ? importSummary.failures.find(
+              (failure) =>
+                failure?.type === "PDF_PARSE_WARNING" ||
+                failure?.type === "PDF_HEADER_NOT_DETECTED",
+            )
+          : null;
+
+        if (parseWarningFailure) {
+          showToast({
+            type: "warning",
+            title: "Atenção na leitura do PDF",
+            message:
+              parseWarningFailure.message ||
+              "Houve linhas ignoradas durante a leitura do PDF.",
+          });
+        }
+      }
 
       showToast({
         type: "success",
@@ -749,19 +803,19 @@ export default function NewInventoryPage() {
           ) : (
             <div className="rounded-xl border border-slate-200 p-4">
               <label className="block text-sm font-medium text-slate-700">
-                Arquivo XLSX do inventário *
+                Arquivo do inventário (XLSX ou PDF) *
               </label>
               <input
                 type="file"
-                accept=".xlsx,.xls"
+                accept=".xlsx,.xls,application/pdf,.pdf"
                 onChange={(event) =>
                   setXlsxFile(event.target.files?.[0] || null)
                 }
                 className="mt-2 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
               />
               <p className="mt-2 text-xs text-slate-600">
-                O arquivo será validado no backend antes da criação do
-                inventário.
+                O arquivo (XLSX/PDF) será validado no backend antes da criação
+                do inventário.
               </p>
             </div>
           )}

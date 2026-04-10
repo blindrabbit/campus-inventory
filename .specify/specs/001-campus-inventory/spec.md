@@ -24,11 +24,12 @@ Além do ciclo inicial, o sistema deve suportar **N verificações de inventári
 - **Sessão**: JWT emitido após bind LDAP bem-sucedido, com `{ sub, role, fullName }` no payload
 - **Provisionamento**: Primeiro login cria registro `User` automaticamente com role `CONFERENTE`
 - **Promoção para ADMIN**: Via script `promote-admin.js` (só após primeiro login)
-- **Sincronização de nome**: após login LDAP bem-sucedido, o sistema deve resolver o objeto do AD e persistir no banco local o `CN`/`displayName` do usuário como `fullName`
+- **Sincronização de nome (one-time)**: no primeiro cadastro do usuário, o sistema deve resolver o objeto do AD e persistir no banco local o `CN`/`displayName` como `fullName`
 - **Nome canônico**: o valor exibido como nome do usuário deve vir do AD, não do siape digitado; o siape permanece apenas como `sAMAccountName`
 - **Busca atômica de identidade**: a resolução do usuário no AD deve priorizar filtro explícito por `sAMAccountName`, `employeeID`, `uid`, `cn` e `displayName`, evitando depender de um retorno genérico de busca
 - **Fallback seguro**: se o AD não devolver `CN`/`displayName`, o sistema pode manter o nome local existente, mas nunca substituir o nome por um valor parcial derivado do login
 - **Bind obrigatório**: a busca de nome exige bind técnico configurado (`LDAP_BIND_USER` e `LDAP_BIND_PASS`) e o container do backend precisa ser recriado quando esses valores mudarem
+- **Fonte pós-cadastro**: após o usuário existir no banco local, listagens, busca e exibição de dados de usuário devem usar somente a base local (sem nova consulta ao AD)
 
 ### Guardrails de Não Regressão (Obrigatórios)
 
@@ -99,7 +100,7 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
   - selecionar perfil no inventário (`ADMIN_CICLO`, `CONFERENTE`, `REVISOR`, `VISUALIZADOR`)
   - confirmar inclusão
 - O CRUD geral deve operar somente sobre usuários já registrados no banco local.
-- O cadastro local deve manter o `CN` atualizado a cada login LDAP bem-sucedido.
+- O cadastro local deve manter o `CN` persistido no primeiro provisionamento; atualizações posteriores exigem ação administrativa explícita.
 - A recuperação do nome do usuário no painel administrativo não deve depender de recomposição a partir do siape; deve usar o valor já persistido após a sincronização LDAP.
 
 ### Painel Próprio de Inventários Autorizados
@@ -150,7 +151,7 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
 - A aba de permissões deve permitir:
   - buscar usuário por `siape`, `cpf` ou `nome`
   - validar primeiro no banco local de usuários
-  - se não existir no banco, consultar Active Directory
+  - se não existir no banco, consultar Active Directory apenas para inclusão inicial
   - ao confirmar inclusão, persistir o usuário no banco local e conceder permissão no inventário
   - remover usuário do inventário
   - ajustar nível de acesso para somente visualização (`VISUALIZADOR`), sem permitir alterações
@@ -185,10 +186,14 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
 
 ### 1. Seleção de Espaço
 
-- Lista de espaços `isActive=true AND isFinalized=false`
+- Lista de espaços `isActive=true`, incluindo espaços finalizados com badge de status
 - **Busca no header**: Campo com debounce 300ms para filtrar por nome do espaço
 - Atalho `Ctrl+K` foca na busca
 - Clique no card navega para `/room/[spaceId]`
+- Card de espaço deve exibir badge de execução da conferência:
+  - `🔴 Não iniciado`
+  - `🟠 Iniciado em DD/MM/AA por <Nome do usuário>`
+  - `🟢 Finalizado`
 - Quando o usuário for **ADMINISTRADOR**, cada card de espaço exibe apenas uma ação de edição flutuante:
   - `✏️` no canto superior direito do card ao passar o mouse sobre a sala
 - A ação `📝 Novo espaço` fica fora do card, logo após o componente de busca do header
@@ -244,6 +249,7 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
 [↩️ DESFAZER] - Reverte última ação, volta ao estado anterior
 [➡️ MOVER] - Abre modal de realocação:
 
+- Campo de pesquisa acima de `Selecione um espaço...` para filtrar por nome do espaço e responsável
 - Dropdown com espaços ativos (exclui current space)
   [🟢 Ótimo] - ALtera o estado de conservação do item para otimo
   [🟡 Regular] - Altera o estado de conservação do item para regular
@@ -271,6 +277,18 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
 - Input manual aceita apenas números de patrimônio existentes no banco
 - Se não encontrar: toast de erro `"Patrimônio não consta no registro oficial."`
 - **Não cria** registros temporários ou pendentes
+
+### 6.1. Encontrado em Massa por Intervalo de Patrimônio
+
+- A tela da sala deve oferecer ação de lote para marcar itens como encontrados por intervalo de patrimônio.
+- Fluxo obrigatório:
+  - informar `patrimonioInicial` e `patrimonioFinal`
+  - gerar prévia com total de itens que serão atualizados
+  - confirmar explicitamente antes de aplicar a alteração em massa
+- Regras de negócio:
+  - intervalo inclusivo (`inicial` e `final` fazem parte do lote)
+  - cada item atualizado deve gerar trilha de auditoria (`ENCONTRADO`)
+  - patrimônios fora do intervalo ou inválidos entram no resumo de ignorados, sem falhar toda operação
 
 ### 7. Auto-Save & Offline
 
@@ -545,7 +563,8 @@ Existe ação de `Criar novo inventário` levando à tela de gestão
 Tela de gestão de inventário permite definir nome, dono, fonte inicial, datas e usuários com acesso
 Usuário sem permissão não acessa inventário por URL direta
 ADMIN_CICLO consegue adicionar/remover usuários no inventário
-Busca de usuários em permissões aceita siape/cpf/nome e consulta banco + AD quando necessário
+Busca de usuários em permissões aceita siape/cpf/nome e usa base local como fonte principal
+Consulta ao AD ocorre apenas no primeiro cadastro do usuário (quando ainda não existir localmente)
 Perfil VISUALIZADOR consegue acessar sem editar dados dos ambientes
 ADMIN_CICLO consegue alterar nome e status operacional do inventário
 Estados do ciclo funcionam: Não iniciado, Pausado, Em Auditoria, Finalizado, Cancelado

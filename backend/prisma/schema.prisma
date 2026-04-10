@@ -84,6 +84,8 @@ model Space {
   inventory     Inventory? @relation(fields: [inventoryId], references: [id], onDelete: SetNull)
   isActive      Boolean    @default(true)
   isFinalized   Boolean    @default(false)
+  startedAt     DateTime?
+  startedBy     String?
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   

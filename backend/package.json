@@ -7,6 +7,7 @@
     "dev": "nodemon src/server.js",
     "prestart": "prisma generate",
     "start": "node src/server.js",
+    "test": "node --test",
     "seed": "node scripts/seed-xlsx.js",
     "promote-admin": "node scripts/promote-admin.js",
     "prisma:generate": "prisma generate",

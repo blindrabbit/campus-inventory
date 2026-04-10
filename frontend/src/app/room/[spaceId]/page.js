@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter, useParams } from "next/navigation";
 import axios from "axios";
 import { enqueueAction, useAutoSave } from "../../../lib/syncQueue";
@@ -8,7 +8,6 @@ import ModalBody from "../../../components/Modal/ModalBody";
 import ModalFooter from "../../../components/Modal/ModalFooter";
 import ConfirmModal from "../../../components/ConfirmModal/ConfirmModal";
 import { useToast } from "../../../components/Toast/toastContext";
-import SpaceSearchBar from "../../../components/SpaceSearchBar/SpaceSearchBar";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 
@@ -44,6 +43,14 @@ export default function RoomPage() {
     total: 0,
     totalPages: 1,
   });
+  const [relocateSearchInput, setRelocateSearchInput] = useState("");
+  const [relocateSearchTerm, setRelocateSearchTerm] = useState("");
+  const [batchStartPatrimonio, setBatchStartPatrimonio] = useState("");
+  const [batchEndPatrimonio, setBatchEndPatrimonio] = useState("");
+  const [batchCondicao, setBatchCondicao] = useState("EXCELENTE");
+  const [batchPreview, setBatchPreview] = useState(null);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -114,6 +121,30 @@ export default function RoomPage() {
     return "bg-slate-100 text-slate-700";
   };
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setRelocateSearchTerm(relocateSearchInput.trim().toLowerCase());
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [relocateSearchInput]);
+
+  const filteredRelocationSpaces = useMemo(() => {
+    const candidates = spaces.filter((s) => s.id !== spaceId);
+    if (!relocateSearchTerm) return candidates;
+
+    return candidates.filter((candidate) => {
+      const name = candidate.name?.toLowerCase() || "";
+      const responsible =
+        candidate.responsibleDisplay?.toLowerCase() ||
+        candidate.responsible?.toLowerCase() ||
+        "";
+      return (
+        name.includes(relocateSearchTerm) ||
+        responsible.includes(relocateSearchTerm)
+      );
+    });
+  }, [relocateSearchTerm, spaceId, spaces]);
+
   const loadData = async (token, inventoryId) => {
     try {
       const [spacesRes, itemsRes] = await Promise.all([
@@ -150,7 +181,13 @@ export default function RoomPage() {
         setItems((prev) =>
           prev.map((i) =>
             i.id === itemId
-              ? { ...i, statusEncontrado: "SIM", condicaoVisual: condicao }
+              ? {
+                  ...i,
+                  statusEncontrado: "SIM",
+                  condicaoVisual: condicao,
+                  // Limpar meta.isRelocated quando confirmar presença
+                  meta: { ...i.meta, isRelocated: false },
+                }
               : i,
           ),
         );
@@ -317,6 +354,104 @@ export default function RoomPage() {
       message:
         "O item foi marcado como não localizado e enviado para sincronização.",
     });
+  };
+
+  const handleBatchPreview = async () => {
+    const patrimonioInicial = batchStartPatrimonio.trim();
+    const patrimonioFinal = batchEndPatrimonio.trim();
+
+    if (!patrimonioInicial || !patrimonioFinal) {
+      showToast({
+        type: "warning",
+        title: "Intervalo incompleto",
+        message: "Informe patrimônio inicial e final para gerar a prévia.",
+      });
+      return;
+    }
+
+    try {
+      setBatchLoading(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const { data } = await axios.post(
+        `${API}/items/check-batch`,
+        {
+          inventoryId,
+          spaceId,
+          patrimonioInicial,
+          patrimonioFinal,
+          condicaoVisual: batchCondicao,
+          dryRun: true,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+
+      setBatchPreview(data);
+      if (!data?.matchedCount) {
+        showToast({
+          type: "info",
+          title: "Prévia sem itens",
+          message:
+            "Nenhum patrimônio no intervalo informado foi encontrado nesta sala.",
+        });
+      }
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha na prévia",
+        message:
+          err.response?.data?.error ||
+          "Não foi possível gerar a prévia da marcação em massa.",
+      });
+    } finally {
+      setBatchLoading(false);
+    }
+  };
+
+  const handleBatchConfirm = async () => {
+    const patrimonioInicial = batchStartPatrimonio.trim();
+    const patrimonioFinal = batchEndPatrimonio.trim();
+
+    try {
+      setBatchLoading(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const { data } = await axios.post(
+        `${API}/items/check-batch`,
+        {
+          inventoryId,
+          spaceId,
+          patrimonioInicial,
+          patrimonioFinal,
+          condicaoVisual: batchCondicao,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+
+      await loadData(token, inventoryId);
+
+      setBatchPreview(data);
+      setBatchConfirmOpen(false);
+      showToast({
+        type: "success",
+        title: "Conferência em massa aplicada",
+        message: `${data.updatedCount || 0} item(ns) marcados como encontrados.`,
+      });
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha na conferência em massa",
+        message:
+          err.response?.data?.error ||
+          "Não foi possível aplicar a marcação em massa.",
+      });
+    } finally {
+      setBatchLoading(false);
+    }
   };
 
   const handleUndoLastAction = async (item) => {
@@ -628,6 +763,80 @@ export default function RoomPage() {
           </div>
         ) : null}
 
+        {activeTab === "itens" ? (
+          <div className="bg-white rounded-xl shadow p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold text-gray-900">
+                  Marcar encontrados em massa
+                </h3>
+                <p className="text-sm text-gray-500">
+                  Informe o intervalo de patrimônio para aplicar em lote.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-4">
+              <input
+                type="text"
+                value={batchStartPatrimonio}
+                onChange={(e) => setBatchStartPatrimonio(e.target.value)}
+                placeholder="Patrimônio inicial"
+                className="border rounded-lg px-3 py-2"
+              />
+              <input
+                type="text"
+                value={batchEndPatrimonio}
+                onChange={(e) => setBatchEndPatrimonio(e.target.value)}
+                placeholder="Patrimônio final"
+                className="border rounded-lg px-3 py-2"
+              />
+              <select
+                value={batchCondicao}
+                onChange={(e) => setBatchCondicao(e.target.value)}
+                className="border rounded-lg px-3 py-2"
+              >
+                <option value="EXCELENTE">🟢 Ótimo</option>
+                <option value="BOM">🟡 Regular</option>
+                <option value="INSERVIVEL">🔴 Ruim</option>
+              </select>
+              <button
+                type="button"
+                onClick={handleBatchPreview}
+                disabled={batchLoading}
+                className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:opacity-50"
+              >
+                {batchLoading ? "Gerando prévia..." : "Pré-visualizar lote"}
+              </button>
+            </div>
+
+            {batchPreview ? (
+              <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-sm text-slate-700">
+                  Itens no intervalo:{" "}
+                  <strong>{batchPreview.matchedCount || 0}</strong>
+                </p>
+                <p className="text-sm text-slate-700">
+                  Itens fora do intervalo/ignorados:{" "}
+                  <strong>{batchPreview.skippedCount || 0}</strong>
+                </p>
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    disabled={
+                      batchLoading || (batchPreview.matchedCount || 0) === 0
+                    }
+                    onClick={() => setBatchConfirmOpen(true)}
+                    className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    Confirmar marcação em massa
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         {activeTab === "itens" && items.length === 0 ? (
           <div className="bg-white p-12 rounded-xl shadow text-center text-gray-500">
             Nenhum item registrado neste espaço.
@@ -806,7 +1015,10 @@ export default function RoomPage() {
       {/* Modal de Realocação */}
       <Modal
         isOpen={Boolean(relocateModal)}
-        onClose={() => setRelocateModal(null)}
+        onClose={() => {
+          setRelocateModal(null);
+          setRelocateSearchInput("");
+        }}
         title={
           relocateModal
             ? `Realocar #${relocateModal.patrimonio}`
@@ -818,6 +1030,13 @@ export default function RoomPage() {
           <p className="text-sm text-gray-600 mb-4">
             Selecione o novo espaço de destino:
           </p>
+          <input
+            type="text"
+            value={relocateSearchInput}
+            onChange={(e) => setRelocateSearchInput(e.target.value)}
+            placeholder="Pesquisar espaço de destino..."
+            className="w-full border rounded-lg p-3 mb-3"
+          />
           <select
             className="w-full border rounded-lg p-3 mb-4"
             onChange={(e) =>
@@ -828,18 +1047,24 @@ export default function RoomPage() {
             defaultValue=""
           >
             <option value="">Selecione um espaço...</option>
-            {spaces
-              .filter((s) => s.id !== spaceId)
-              .map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
+            {filteredRelocationSpaces.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} • {s.responsibleDisplay || s.responsible}
+              </option>
+            ))}
           </select>
+          {filteredRelocationSpaces.length === 0 ? (
+            <p className="text-sm text-amber-700 bg-amber-50 rounded-lg px-3 py-2">
+              Nenhum espaço encontrado para o termo informado.
+            </p>
+          ) : null}
         </ModalBody>
         <ModalFooter>
           <button
-            onClick={() => setRelocateModal(null)}
+            onClick={() => {
+              setRelocateModal(null);
+              setRelocateSearchInput("");
+            }}
             className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
           >
             Cancelar
@@ -894,6 +1119,17 @@ export default function RoomPage() {
         confirmText="Confirmar remoção"
         cancelText="Cancelar"
         variant="danger"
+      />
+
+      <ConfirmModal
+        isOpen={batchConfirmOpen}
+        onConfirm={handleBatchConfirm}
+        onCancel={() => setBatchConfirmOpen(false)}
+        title="Confirmar encontrado em massa"
+        message={`Aplicar status de encontrado para ${batchPreview?.matchedCount || 0} item(ns) no intervalo informado?`}
+        confirmText="Aplicar em massa"
+        cancelText="Cancelar"
+        variant="warning"
       />
     </div>
   );

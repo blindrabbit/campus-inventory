@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { verifyJWT } from "../middleware/auth.js";
 import { prisma } from "../prisma/client.js";
-import { resolveUserCn } from "../services/ldap.js";
 
 const router = Router();
 
@@ -92,33 +91,8 @@ router.get("/users", async (req, res) => {
       take: 200,
     });
 
-    const resolvedUsers = await Promise.all(
-      users.map(async (user) => {
-        const needsLdapName =
-          !user.fullName ||
-          user.fullName.toLowerCase() === user.samAccountName.toLowerCase();
-
-        if (!needsLdapName) {
-          return user;
-        }
-
-        const ldapName = await resolveUserCn(user.samAccountName);
-        if (
-          !ldapName ||
-          ldapName.toLowerCase() === user.samAccountName.toLowerCase()
-        ) {
-          return user;
-        }
-
-        return {
-          ...user,
-          fullName: ldapName,
-        };
-      }),
-    );
-
     return res.json(
-      resolvedUsers.map((user) => ({
+      users.map((user) => ({
         userId: user.id,
         samAccountName: user.samAccountName,
         fullName: user.fullName,

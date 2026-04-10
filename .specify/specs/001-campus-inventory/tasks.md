@@ -149,7 +149,7 @@ Testar offline: Desconectar rede → Confirmar item → Reconectar → Verificar
 - [x] Implementar busca de usuários por siape/cpf/nome na aba de permissões
 - [x] Implementar fluxo de resolução de usuário:
   - [x] consultar banco local primeiro
-  - [x] se não encontrar, consultar Active Directory
+  - [x] se não encontrar, consultar Active Directory apenas para o primeiro cadastro
   - [x] ao adicionar, persistir usuário local e vínculo no inventário
 - [x] Implementar remoção de usuário do inventário
 - [x] Implementar alteração de perfil do usuário no inventário (incluindo VISUALIZADOR)
@@ -223,9 +223,10 @@ Testar offline: Desconectar rede → Confirmar item → Reconectar → Verificar
 - [x] Criar endpoint `PATCH /api/admin/users/:userId/inventories/:inventoryId` para alterar perfil no inventário
 - [x] Criar endpoint `DELETE /api/admin/users/:userId/inventories/:inventoryId` para remover vínculo
 - [x] Restringir CRUD geral a perfis administrativos autorizados
-- [x] Garantir que o login atualize sempre `fullName` local com o CN retornado pelo LDAP
+- [x] Garantir que o login resolva e persista `fullName` via LDAP apenas no primeiro cadastro do usuário
 - [x] Resolver identidade no AD com bind técnico e filtro explícito por `sAMAccountName`, `employeeID`, `uid`, `cn` e `displayName`
 - [x] Garantir que a busca de CN depende de `LDAP_BIND_USER` e `LDAP_BIND_PASS` carregados no container do backend
+- [x] Garantir que, após cadastrado localmente, o sistema use apenas a base local para exibir e buscar dados de usuários
 
 ### Frontend
 
@@ -275,10 +276,37 @@ Testar offline: Desconectar rede → Confirmar item → Reconectar → Verificar
 - [x] Validar que nomes antes não resolvidos entram na prévia quando o SIAPE tem correspondência única no AD
 - [x] Validar preenchimento do formulário de criação de inventário após confirmação da importação
 
+## ⚡ Fase 16: Agilidade de Movimentação + Status de Espaço + Encontrado em Massa
+
+### Busca no Modal de Mover
+
+- [x] Frontend: inserir campo de pesquisa antes do seletor `Selecione um espaço...` no modal de mover item
+- [x] Frontend: aplicar filtro por nome do espaço e responsável com debounce
+- [x] Frontend: manter comportamento atual de seleção no dropdown após filtro
+- [ ] QA: validar busca rápida de destino em inventários com muitos espaços
+
+### Sinalizador de Status no Card do Espaço
+
+- [x] Backend: adicionar metadados de início de execução do espaço (`startedAt`, `startedBy`)
+- [x] Backend: no primeiro registro (`encontrado`, `mover`, `não localizado`), gravar data e usuário de início sem sobrescrever
+- [x] Frontend: exibir status no card:
+  - [x] `🔴 Não iniciado`
+  - [x] `🟠 Iniciado em DD/MM/AA por <Nome do usuário>`
+  - [x] `🟢 Finalizado`
+- [ ] QA: validar transição dos três estados no fluxo real da conferência
+
+### Encontrado em Massa por Intervalo de Patrimônio
+
+- [x] Backend: criar endpoint de atualização em lote para marcar itens como encontrados por intervalo de patrimônio
+- [x] Backend: registrar histórico de auditoria por item atualizado no lote
+- [x] Frontend: adicionar ação para informar `patrimonioInicial` e `patrimonioFinal`
+- [x] Frontend: exibir prévia com total de itens afetados antes de confirmar ação em massa
+- [ ] QA: validar cenários de biblioteca e carteiras com intervalos contínuos e intervalos com lacunas
+
 ## 🎯 Critérios de Aceite do MVP
 
 Login LDAP funciona com usuário real da instituição
-Lista de espaços exibe apenas ativos e não finalizados
+Lista de espaços exibe ativos com status visual de execução, incluindo finalizados
 Card de item expande/colapsa com clique no corpo
 Botões de conservação atualizam condicaoVisual e salvam automaticamente
 Realocação mostra badge visual e requer confirmação no destino
@@ -292,6 +320,10 @@ Inventário não autorizado não é acessível por URL direta
 Admin do inventário consegue adicionar/remover usuários e ajustar perfis
 Busca de usuário em permissões aceita siape/cpf/nome
 Se usuário não existir no banco local, sistema consulta AD e cria cadastro ao adicionar
+Após o primeiro cadastro, dados de usuário são consultados apenas na base local
 Perfil VISUALIZADOR consegue consultar dados sem permissão de edição
 Admin do inventário consegue alterar nome e status operacional
 Mudanças de status ficam registradas em histórico de auditoria
+Cards de espaço exibem corretamente status `Não iniciado`, `Iniciado em DD/MM/AA por usuário` e `Finalizado`
+Modal de mover item permite localizar destino via pesquisa antes do seletor de espaço
+Fluxo de encontrado em massa por intervalo de patrimônio atualiza itens esperados e registra auditoria

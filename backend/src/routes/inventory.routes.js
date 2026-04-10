@@ -13,6 +13,7 @@ import {
   ensureInventoryBootstrapForUser,
   findUserBySamAccountName,
 } from "../services/inventory.js";
+import { repairMojibake } from "../utils/pdf-text.js";
 import {
   findDirectoryUserBySam,
   findUniqueDirectoryUserByEmployeeID,
@@ -57,6 +58,12 @@ const isValidInventoryStatus = (status) => INVENTORY_STATUSES.includes(status);
 const INVENTORY_SOURCE_TYPES = ["UPLOAD_XLSX", "REUSE_BASE"];
 const XLSX_REQUIRED_COLUMNS = ["patrimonio", "descricao"];
 const XLSX_ROOM_COLUMNS = ["voce digita a sala", "setor"];
+const UNKNOWN_LOCATION_KEY = "SEM_LOCAL";
+const MAX_IMPORT_FAILURE_SAMPLES = 30;
+const PDF_REQUIRED_COLUMNS = ["patrimonio", "descricao", "localizacao"];
+const PDF_HEADER_PATTERN = /seq\s+class.*cod\s*bem.*descricao.*localizacao/i;
+const PDF_ROW_PATTERN =
+  /^(\d{6,})\s+(\d+)\s+(.+?)\s+(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+([\d.]+,\d{2})\s+(\d+)\s+(.+)$/i;
 
 const normalizeColumnName = (value) =>
   value
@@ -118,13 +125,17 @@ const resolveOrSyncLocalUserBySam = async (samAccountName) => {
   const normalizedSam = samAccountName?.toString().trim();
   if (!normalizedSam) return null;
 
-  let user = await prisma.user.findUnique({
+  const user = await prisma.user.findUnique({
     where: { samAccountName: normalizedSam },
   });
 
+  if (user) {
+    return user;
+  }
+
   const directoryUser = await findDirectoryUserBySam(normalizedSam);
   if (!directoryUser) {
-    return user;
+    return null;
   }
 
   const resolvedSam =
@@ -133,24 +144,13 @@ const resolveOrSyncLocalUserBySam = async (samAccountName) => {
     normalizedSam;
   const resolvedFullName = directoryUser.fullName || resolvedSam;
 
-  if (!user) {
-    return prisma.user.create({
-      data: {
-        samAccountName: resolvedSam,
-        fullName: resolvedFullName,
-        role: "CONFERENTE",
-      },
-    });
-  }
-
-  if (user.fullName !== resolvedFullName) {
-    user = await prisma.user.update({
-      where: { id: user.id },
-      data: { fullName: resolvedFullName },
-    });
-  }
-
-  return user;
+  return prisma.user.create({
+    data: {
+      samAccountName: resolvedSam,
+      fullName: resolvedFullName,
+      role: "CONFERENTE",
+    },
+  });
 };
 
 const canUserCreateInventory = async (user) => {
@@ -278,6 +278,7 @@ const parseInventoryWorkbook = async (buffer) => {
 
     return {
       valid: true,
+      sourceFormat: "XLSX",
       sheetName,
       rowCount: rows.length,
       headers,
@@ -286,6 +287,184 @@ const parseInventoryWorkbook = async (buffer) => {
   } catch (error) {
     return { valid: false, error: "Arquivo XLSX inválido ou corrompido" };
   }
+};
+
+const createImportSummary = ({ sourceFormat, totalRowsRead }) => ({
+  sourceFormat,
+  totalRowsRead,
+  totalItemsRegistered: 0,
+  totalItemsSkipped: 0,
+  locationTotalsKnown: {},
+  unknownLocationCount: 0,
+  failures: [],
+  parseDiagnostics: null,
+});
+
+const pushImportFailure = (summary, failure) => {
+  if (!summary || summary.failures.length >= MAX_IMPORT_FAILURE_SAMPLES) return;
+  summary.failures.push(failure);
+};
+
+const parseInventoryPdf = async (buffer) => {
+  const parser = new PDFParse({ data: buffer });
+
+  try {
+    const parsed = await parser.getText();
+    const text = repairMojibake(parsed?.text?.toString() || "");
+
+    if (!text.trim()) {
+      return { valid: false, error: "Arquivo PDF sem texto legível" };
+    }
+
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+
+    const rows = [];
+    const normalizedLines = lines.map((line) => normalizeColumnName(line));
+    const hasHeader = normalizedLines.some((line) =>
+      PDF_HEADER_PATTERN.test(line),
+    );
+    const parseDiagnostics = {
+      totalInputLines: lines.length,
+      candidateRowLines: 0,
+      parsedRowLines: 0,
+      skippedCandidateLines: 0,
+      skippedCandidateSamples: [],
+      detectedHeader: hasHeader,
+    };
+
+    const hasLetters = (value) => /[a-zA-Z]/.test(value);
+    const hasDigits = (value) => /\d/.test(value);
+    const isCandidateRowLine = (line) => /^\d{6,}\s+\d+\s+/.test(line);
+    const trackSkippedCandidate = (line, reason) => {
+      parseDiagnostics.skippedCandidateLines += 1;
+      if (parseDiagnostics.skippedCandidateSamples.length < 10) {
+        parseDiagnostics.skippedCandidateSamples.push({ reason, line });
+      }
+    };
+
+    for (const line of lines) {
+      if (
+        PDF_HEADER_PATTERN.test(line) ||
+        /^pagina\s+\d+\s+de\s+\d+/i.test(line) ||
+        /^--\s*\d+\s+of\s+\d+\s*--$/i.test(line) ||
+        /^total\s+parcial/i.test(line)
+      ) {
+        continue;
+      }
+
+      if (isCandidateRowLine(line)) {
+        parseDiagnostics.candidateRowLines += 1;
+      }
+
+      const match = line.match(PDF_ROW_PATTERN);
+      if (!match) {
+        if (isCandidateRowLine(line)) {
+          trackSkippedCandidate(
+            line,
+            "Formato não reconhecido para linha de item",
+          );
+        }
+        continue;
+      }
+
+      const trailingTokens = match[5]
+        .split(" ")
+        .map((token) => token.trim())
+        .filter(Boolean);
+
+      if (trailingTokens.length < 2 || trailingTokens.length > 3) {
+        trackSkippedCandidate(
+          line,
+          "Colunas intermediárias inesperadas entre aquisição e valor",
+        );
+        continue;
+      }
+
+      const empenho = trailingTokens[trailingTokens.length - 1] || null;
+      let notaFis = null;
+      let cons = null;
+
+      if (trailingTokens.length === 2) {
+        if (hasLetters(trailingTokens[0]) && !hasDigits(trailingTokens[0])) {
+          cons = trailingTokens[0];
+        } else {
+          notaFis = trailingTokens[0];
+        }
+      } else {
+        const first = trailingTokens[0];
+        const second = trailingTokens[1];
+
+        if (hasLetters(first) && !hasLetters(second)) {
+          cons = first;
+          notaFis = second;
+        } else if (!hasLetters(first) && hasLetters(second)) {
+          notaFis = first;
+          cons = second;
+        } else {
+          cons = first;
+          notaFis = second;
+        }
+      }
+
+      rows.push({
+        class: match[1],
+        patrimonio: match[2],
+        descricao: repairMojibake(match[3]),
+        aquisicao: match[4],
+        "nota fis": notaFis,
+        cons,
+        empenho,
+        valor: match[6],
+        seq: match[7],
+        localizacao: repairMojibake(match[8]),
+      });
+
+      parseDiagnostics.parsedRowLines += 1;
+    }
+
+    if (rows.length === 0) {
+      return {
+        valid: false,
+        error:
+          "Não foi possível extrair linhas do PDF. Verifique se o arquivo segue o layout do inventário patrimonial e se possui texto legível.",
+      };
+    }
+
+    const headers = Object.keys(rows[0] || {}).map((h) =>
+      normalizeColumnName(h),
+    );
+    const missingColumns = PDF_REQUIRED_COLUMNS.filter(
+      (column) => !headers.includes(column),
+    );
+    if (missingColumns.length > 0) {
+      return {
+        valid: false,
+        error: `Colunas obrigatórias ausentes no PDF: ${missingColumns.join(", ")}`,
+      };
+    }
+
+    return {
+      valid: true,
+      sourceFormat: "PDF",
+      rowCount: rows.length,
+      headers,
+      rows,
+      parseDiagnostics,
+    };
+  } catch {
+    return { valid: false, error: "Arquivo PDF inválido ou corrompido" };
+  } finally {
+    await parser.destroy();
+  }
+};
+
+const isPdfUpload = (file) => {
+  const mime = file?.mimetype?.toLowerCase() || "";
+  const name = file?.originalname?.toLowerCase() || "";
+  return mime.includes("pdf") || name.endsWith(".pdf");
 };
 
 const canTransitionStatus = (fromStatus, toStatus) => {
@@ -436,7 +615,7 @@ const resolvePersonByNameOrSam = async (identifier) => {
   const term = identifier?.toString().trim();
   if (!term) return null;
 
-  let localUser = await prisma.user.findFirst({
+  const localUser = await prisma.user.findFirst({
     where: {
       OR: [
         { samAccountName: { contains: term } },
@@ -445,6 +624,13 @@ const resolvePersonByNameOrSam = async (identifier) => {
     },
     orderBy: { fullName: "asc" },
   });
+
+  if (localUser) {
+    return {
+      user: localUser,
+      createdFromDirectory: false,
+    };
+  }
 
   const directoryCandidates = await searchDirectoryUsers(term, 10);
   let directoryUser = null;
@@ -468,13 +654,6 @@ const resolvePersonByNameOrSam = async (identifier) => {
       directoryCandidates[0];
   }
 
-  if (!directoryUser && localUser) {
-    return {
-      user: localUser,
-      createdFromDirectory: false,
-    };
-  }
-
   if (!directoryUser) {
     return null;
   }
@@ -484,38 +663,28 @@ const resolvePersonByNameOrSam = async (identifier) => {
     return null;
   }
 
-  if (!localUser) {
-    localUser = await prisma.user.findUnique({
-      where: { samAccountName: resolvedSam },
-    });
-  }
+  const existingByResolvedSam = await prisma.user.findUnique({
+    where: { samAccountName: resolvedSam },
+  });
 
-  if (!localUser) {
-    localUser = await prisma.user.create({
-      data: {
-        samAccountName: resolvedSam,
-        fullName: directoryUser.fullName || resolvedSam,
-        role: "CONFERENTE",
-      },
-    });
-
+  if (existingByResolvedSam) {
     return {
-      user: localUser,
-      createdFromDirectory: true,
+      user: existingByResolvedSam,
+      createdFromDirectory: false,
     };
   }
 
-  const resolvedFullName = directoryUser.fullName || localUser.fullName;
-  if (resolvedFullName && localUser.fullName !== resolvedFullName) {
-    localUser = await prisma.user.update({
-      where: { id: localUser.id },
-      data: { fullName: resolvedFullName },
-    });
-  }
+  const createdLocalUser = await prisma.user.create({
+    data: {
+      samAccountName: resolvedSam,
+      fullName: directoryUser.fullName || resolvedSam,
+      role: "CONFERENTE",
+    },
+  });
 
   return {
-    user: localUser,
-    createdFromDirectory: false,
+    user: createdLocalUser,
+    createdFromDirectory: true,
   };
 };
 
@@ -868,11 +1037,13 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
       if (!req.file?.buffer) {
         return res.status(400).json({
           error:
-            "Arquivo XLSX é obrigatório quando a fonte de dados é UPLOAD_XLSX",
+            "Arquivo XLSX ou PDF é obrigatório quando a fonte de dados é UPLOAD_XLSX",
         });
       }
 
-      uploadValidation = await parseInventoryWorkbook(req.file.buffer);
+      uploadValidation = isPdfUpload(req.file)
+        ? await parseInventoryPdf(req.file.buffer)
+        : await parseInventoryWorkbook(req.file.buffer);
       if (!uploadValidation.valid) {
         return res.status(400).json({
           error: uploadValidation.error,
@@ -952,6 +1123,8 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
         role,
       });
     }
+
+    let importSummary = null;
 
     const newInventory = await prisma.$transaction(
       async (tx) => {
@@ -1072,12 +1245,39 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
             normalizeRow(row),
           );
 
+          importSummary = createImportSummary({
+            sourceFormat: uploadValidation.sourceFormat || "XLSX",
+            totalRowsRead: xlsxRows.length,
+          });
+
+          if (uploadValidation.parseDiagnostics) {
+            importSummary.parseDiagnostics = uploadValidation.parseDiagnostics;
+
+            if (!uploadValidation.parseDiagnostics.detectedHeader) {
+              pushImportFailure(importSummary, {
+                type: "PDF_HEADER_NOT_DETECTED",
+                message:
+                  "Cabeçalho do PDF não foi identificado com confiança; leitura continuou por detecção de linhas de item.",
+              });
+            }
+
+            if (uploadValidation.parseDiagnostics.skippedCandidateLines > 0) {
+              pushImportFailure(importSummary, {
+                type: "PDF_PARSE_WARNING",
+                message: `Foram ignoradas ${uploadValidation.parseDiagnostics.skippedCandidateLines} linhas candidatas durante a leitura do PDF`,
+                samples:
+                  uploadValidation.parseDiagnostics.skippedCandidateSamples,
+              });
+            }
+          }
+
           const spacesByKey = new Map();
           for (const row of xlsxRows) {
             const roomName =
               toTextOrNull(row["voce digita a sala"]) ||
+              toTextOrNull(row.localizacao) ||
               toTextOrNull(row.setor) ||
-              "SEM_LOCAL";
+              UNKNOWN_LOCATION_KEY;
 
             const spaceKey = roomName.toLowerCase();
             const previous = spacesByKey.get(spaceKey);
@@ -1126,9 +1326,27 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
 
           const seenPatrimonios = new Set();
           const itemPayload = [];
-          for (const row of xlsxRows) {
+          for (const [rowIndex, row] of xlsxRows.entries()) {
+            const rowReference =
+              Number.parseInt(toTextOrNull(row.seq) || "", 10) || rowIndex + 1;
+
             const patrimonio = toTextOrNull(row.patrimonio);
-            if (!patrimonio || seenPatrimonios.has(patrimonio)) {
+            if (!patrimonio) {
+              pushImportFailure(importSummary, {
+                type: "MISSING_PATRIMONIO",
+                row: rowReference,
+                message: "Linha ignorada por patrimônio ausente",
+              });
+              continue;
+            }
+
+            if (seenPatrimonios.has(patrimonio)) {
+              pushImportFailure(importSummary, {
+                type: "DUPLICATE_PATRIMONIO",
+                row: rowReference,
+                patrimonio,
+                message: "Linha ignorada por patrimônio duplicado",
+              });
               continue;
             }
 
@@ -1136,10 +1354,19 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
 
             const roomName =
               toTextOrNull(row["voce digita a sala"]) ||
+              toTextOrNull(row.localizacao) ||
               toTextOrNull(row.setor) ||
-              "SEM_LOCAL";
+              UNKNOWN_LOCATION_KEY;
             const spaceId = spaceIdMap.get(roomName.toLowerCase());
             if (!spaceId) {
+              pushImportFailure(importSummary, {
+                type: "SPACE_NOT_CREATED",
+                row: rowReference,
+                patrimonio,
+                location: roomName,
+                message:
+                  "Linha ignorada porque não foi possível mapear a localização",
+              });
               continue;
             }
 
@@ -1159,16 +1386,21 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
               condicaoOriginal:
                 toTextOrNull(row.condicao) ||
                 toTextOrNull(row["(estado)"]) ||
+                toTextOrNull(row.cons) ||
                 "Não informado",
               fornecedor: toTextOrNull(row.fornecedor),
               cnpjFornecedor: toTextOrNull(row.cnpj_fornecedor),
               catalogo: toTextOrNull(row.catalogo),
-              codigoSIA: toTextOrNull(row.codigo_sia),
+              codigoSIA:
+                toTextOrNull(row.codigo_sia) || toTextOrNull(row.class),
               descricaoSIA: toTextOrNull(row.descricao_sia),
-              numeroEntrada: toTextOrNull(row.numero_entrada),
+              numeroEntrada:
+                toTextOrNull(row.numero_entrada) || toTextOrNull(row.empenho),
               dataEntrada: parseDate(row.data_entrada),
-              dataAquisicao: parseDate(row.data_aquisicao),
-              documento: toTextOrNull(row.documento),
+              dataAquisicao:
+                parseDate(row.data_aquisicao) || parseDate(row.aquisicao),
+              documento:
+                toTextOrNull(row.documento) || toTextOrNull(row["nota fis"]),
               dataDocumento: parseDate(row.data_documento),
               tipoAquisicao: toTextOrNull(row.tipo_aquisicao),
               inventoryId: createdInventory.id,
@@ -1179,7 +1411,18 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
               dataConferencia: null,
               ultimoConferente: null,
             });
+
+            importSummary.totalItemsRegistered += 1;
+            if (roomName === UNKNOWN_LOCATION_KEY) {
+              importSummary.unknownLocationCount += 1;
+            } else {
+              importSummary.locationTotalsKnown[roomName] =
+                (importSummary.locationTotalsKnown[roomName] || 0) + 1;
+            }
           }
+
+          importSummary.totalItemsSkipped =
+            importSummary.totalRowsRead - importSummary.totalItemsRegistered;
 
           if (itemPayload.length > 0) {
             await tx.item.createMany({ data: itemPayload });
@@ -1200,6 +1443,21 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
               ? {
                   rowCount: uploadValidation.rowCount,
                   sheetName: uploadValidation.sheetName,
+                  sourceFormat: uploadValidation.sourceFormat || "XLSX",
+                  importSummary: importSummary
+                    ? {
+                        totalRowsRead: importSummary.totalRowsRead,
+                        totalItemsRegistered:
+                          importSummary.totalItemsRegistered,
+                        totalItemsSkipped: importSummary.totalItemsSkipped,
+                        unknownLocationCount:
+                          importSummary.unknownLocationCount,
+                        knownLocations: Object.keys(
+                          importSummary.locationTotalsKnown,
+                        ).length,
+                        failureCount: importSummary.failures.length,
+                      }
+                    : null,
                 }
               : null,
           }),
@@ -1222,6 +1480,7 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
         startedAt: newInventory.startedAt,
         finishedAt: newInventory.finishedAt,
       },
+      importSummary,
     });
   } catch (error) {
     console.error("Error creating inventory:", error);

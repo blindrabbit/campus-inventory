@@ -97,6 +97,32 @@ export default function DashboardPage() {
     return user?.role === "ADMIN" || activeInventory?.role === "ADMIN_CICLO";
   }, [user, activeInventory]);
 
+  const formatSpaceExecutionStatus = (space) => {
+    if (space.isFinalized || space.executionStatus === "FINALIZADO") {
+      return {
+        label: "🟢 Finalizado",
+        className: "bg-emerald-100 text-emerald-800",
+      };
+    }
+
+    if (space.startedAt || space.executionStatus === "INICIADO") {
+      const startedLabel = space.startedAt
+        ? new Date(space.startedAt).toLocaleDateString("pt-BR")
+        : "--/--/--";
+      const startedBy = space.startedBy || "usuário não identificado";
+
+      return {
+        label: `🟠 Iniciado em ${startedLabel} por ${startedBy}`,
+        className: "bg-amber-100 text-amber-800",
+      };
+    }
+
+    return {
+      label: "🔴 Não iniciado",
+      className: "bg-rose-100 text-rose-800",
+    };
+  };
+
   const activeTabMeta = useMemo(
     () => visibleTabs.find((tab) => tab.id === activeTab) || visibleTabs[0],
     [activeTab, visibleTabs],
@@ -198,7 +224,7 @@ export default function DashboardPage() {
   const loadSpaces = async (token, inventoryId) => {
     try {
       const { data } = await axios.get(`${API}/spaces/active`, {
-        params: { inventoryId },
+        params: { inventoryId, includeFinalized: "true" },
         headers: { Authorization: `Bearer ${token}` },
       });
       setSpaces(data);
@@ -764,78 +790,89 @@ export default function DashboardPage() {
           </div>
         ) : activeTab === "espacos" ? (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {spaces.map((space) => (
-              <div
-                key={space.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => router.push(`/room/${space.id}`)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    router.push(`/room/${space.id}`);
-                  }
-                }}
-                className="group relative block cursor-pointer overflow-hidden rounded-xl border border-gray-100 bg-white shadow-md transition-all duration-300 hover:shadow-xl"
-              >
-                {user?.role === "ADMIN" ? (
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openEditSpaceModal(space);
-                    }}
-                    className="absolute left-3 top-3 z-10 rounded-full bg-white/95 px-3 py-2 text-sm font-semibold text-slate-700 opacity-0 shadow-md transition hover:bg-slate-50 group-hover:opacity-100"
-                    aria-label={`Editar espaço ${space.name}`}
-                    title="Editar nome"
-                  >
-                    ✏️
-                  </button>
-                ) : null}
-                <div className="p-6">
-                  <div className="flex justify-between items-start mb-4">
-                    <h3 className="font-bold text-lg text-gray-900 group-hover:text-blue-600 transition line-clamp-2">
-                      {space.name}
-                    </h3>
-                    <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
-                      {space.itemCount}{" "}
-                      {space.itemCount === 1 ? "item" : "itens"}
-                    </span>
-                  </div>
+            {spaces.map((space) => {
+              const executionStatus = formatSpaceExecutionStatus(space);
+              return (
+                <div
+                  key={space.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => router.push(`/room/${space.id}`)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      router.push(`/room/${space.id}`);
+                    }
+                  }}
+                  className="group relative block cursor-pointer overflow-hidden rounded-xl border border-gray-100 bg-white shadow-md transition-all duration-300 hover:shadow-xl"
+                >
+                  {user?.role === "ADMIN" ? (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openEditSpaceModal(space);
+                      }}
+                      className="absolute left-3 top-3 z-10 rounded-full bg-white/95 px-3 py-2 text-sm font-semibold text-slate-700 opacity-0 shadow-md transition hover:bg-slate-50 group-hover:opacity-100"
+                      aria-label={`Editar espaço ${space.name}`}
+                      title="Editar nome"
+                    >
+                      ✏️
+                    </button>
+                  ) : null}
+                  <div className="p-6">
+                    <div className="flex justify-between items-start mb-4">
+                      <h3 className="font-bold text-lg text-gray-900 group-hover:text-blue-600 transition line-clamp-2">
+                        {space.name}
+                      </h3>
+                      <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
+                        {space.itemCount}{" "}
+                        {space.itemCount === 1 ? "item" : "itens"}
+                      </span>
+                    </div>
 
-                  <div className="space-y-2 mb-6">
-                    <div className="flex items-center text-sm text-gray-600">
-                      <span className="font-medium mr-2">👤</span>
-                      <span className="truncate">
-                        {space.responsible || "Não informado"}
+                    <div className="mb-4">
+                      <span
+                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${executionStatus.className}`}
+                      >
+                        {executionStatus.label}
+                      </span>
+                    </div>
+
+                    <div className="space-y-2 mb-6">
+                      <div className="flex items-center text-sm text-gray-600">
+                        <span className="font-medium mr-2">👤</span>
+                        <span className="truncate">
+                          {space.responsible || "Não informado"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-4 border-t border-gray-100">
+                      <span className="text-sm text-gray-500">
+                        Clique para conferir
+                      </span>
+                      <span className="inline-flex items-center text-blue-600 font-medium group-hover:translate-x-1 transition-transform">
+                        {space.isFinalized ? "Visualizar" : "Iniciar"}
+                        <svg
+                          className="w-4 h-4 ml-1"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M9 5l7 7-7 7"
+                          />
+                        </svg>
                       </span>
                     </div>
                   </div>
-
-                  <div className="flex items-center justify-between pt-4 border-t border-gray-100">
-                    <span className="text-sm text-gray-500">
-                      Clique para conferir
-                    </span>
-                    <span className="inline-flex items-center text-blue-600 font-medium group-hover:translate-x-1 transition-transform">
-                      Iniciar
-                      <svg
-                        className="w-4 h-4 ml-1"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M9 5l7 7-7 7"
-                        />
-                      </svg>
-                    </span>
-                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : null}
 
