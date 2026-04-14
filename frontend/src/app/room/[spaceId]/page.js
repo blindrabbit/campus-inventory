@@ -61,6 +61,7 @@ export default function RoomPage() {
   const [searchError, setSearchError] = useState("");
   const [isFinalizeModalOpen, setIsFinalizeModalOpen] = useState(false);
   const [pendingMoveCandidate, setPendingMoveCandidate] = useState(null);
+  const [groupMoveCount, setGroupMoveCount] = useState("");
   const [pendingUnfoundItem, setPendingUnfoundItem] = useState(null);
   const [activeTab, setActiveTab] = useState("itens");
   const [movementHistory, setMovementHistory] = useState([]);
@@ -81,6 +82,7 @@ export default function RoomPage() {
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
   const [showFoundItems, setShowFoundItems] = useState(true);
   const [showRelocatedItems, setShowRelocatedItems] = useState(true);
+  const [expandedGroups, setExpandedGroups] = useState({});
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -143,6 +145,34 @@ export default function RoomPage() {
   const formatMovementDate = (value) => {
     if (!value) return "-";
     return new Date(value).toLocaleString("pt-BR");
+  };
+
+  const getSpaceStartBadge = (spaceData) => {
+    const wasStarted =
+      Boolean(spaceData?.startedAt) ||
+      spaceData?.executionStatus === "INICIADO" ||
+      spaceData?.executionStatus === "FINALIZADO" ||
+      spaceData?.isFinalized;
+
+    if (wasStarted) {
+      const startedLabel = spaceData?.startedAt
+        ? new Date(spaceData.startedAt).toLocaleDateString("pt-BR")
+        : "--/--/--";
+      const startedBy =
+        spaceData?.startedByDisplay ||
+        spaceData?.startedBy ||
+        "usuário não identificado";
+
+      return {
+        label: `Iniciado em ${startedLabel} por ${startedBy}`,
+        className: "bg-amber-100 text-amber-800",
+      };
+    }
+
+    return {
+      label: "Não iniciado",
+      className: "bg-rose-100 text-rose-700",
+    };
   };
 
   const getDirectionBadgeClass = (direction) => {
@@ -222,18 +252,39 @@ export default function RoomPage() {
 
   const filteredRelocationSpaces = useMemo(() => {
     const candidates = spaces.filter((s) => s.id !== spaceId);
-    if (!relocateSearchTerm) return candidates;
+    const filtered = !relocateSearchTerm
+      ? candidates
+      : candidates.filter((candidate) => {
+          const name = candidate.name?.toLowerCase() || "";
+          const responsible =
+            candidate.responsibleDisplay?.toLowerCase() ||
+            candidate.responsible?.toLowerCase() ||
+            "";
+          return (
+            name.includes(relocateSearchTerm) ||
+            responsible.includes(relocateSearchTerm)
+          );
+        });
 
-    return candidates.filter((candidate) => {
-      const name = candidate.name?.toLowerCase() || "";
-      const responsible =
-        candidate.responsibleDisplay?.toLowerCase() ||
-        candidate.responsible?.toLowerCase() ||
-        "";
-      return (
-        name.includes(relocateSearchTerm) ||
-        responsible.includes(relocateSearchTerm)
-      );
+    return filtered.sort((a, b) => {
+      const aStarted =
+        Boolean(a.startedAt) ||
+        a.executionStatus === "INICIADO" ||
+        a.executionStatus === "FINALIZADO" ||
+        a.isFinalized;
+      const bStarted =
+        Boolean(b.startedAt) ||
+        b.executionStatus === "INICIADO" ||
+        b.executionStatus === "FINALIZADO" ||
+        b.isFinalized;
+
+      if (aStarted !== bStarted) {
+        return aStarted ? 1 : -1;
+      }
+
+      return (a.name || "").localeCompare(b.name || "", "pt-BR", {
+        sensitivity: "base",
+      });
     });
   }, [relocateSearchTerm, spaceId, spaces]);
 
@@ -244,6 +295,50 @@ export default function RoomPage() {
       return true;
     });
   }, [items, showFoundItems, showRelocatedItems]);
+
+  // Separa itens em grupos visuais (pilha) e itens avulsos
+  // Itens/grupos movidos aparecem primeiro
+  const displayRows = useMemo(() => {
+    const groupMap = {};
+    const rows = [];
+    for (const item of filteredItems) {
+      if (item.itemGroupId) {
+        if (!groupMap[item.itemGroupId]) {
+          groupMap[item.itemGroupId] = {
+            type: "group",
+            groupId: item.itemGroupId,
+            groupName: item.groupName,
+            items: [],
+          };
+          rows.push(groupMap[item.itemGroupId]);
+        }
+        groupMap[item.itemGroupId].items.push(item);
+      } else {
+        rows.push({ type: "single", item });
+      }
+    }
+    // Sort: relocated rows first
+    rows.sort((a, b) => {
+      const aRelocated =
+        a.type === "single"
+          ? a.item.meta?.isRelocated
+            ? 1
+            : 0
+          : a.items.some((i) => i.meta?.isRelocated)
+            ? 1
+            : 0;
+      const bRelocated =
+        b.type === "single"
+          ? b.item.meta?.isRelocated
+            ? 1
+            : 0
+          : b.items.some((i) => i.meta?.isRelocated)
+            ? 1
+            : 0;
+      return bRelocated - aRelocated;
+    });
+    return rows;
+  }, [filteredItems]);
 
   const foundItemsCount = useMemo(
     () => items.filter((item) => item.statusEncontrado === "SIM").length,
@@ -417,12 +512,59 @@ export default function RoomPage() {
     }
   };
 
-  const confirmMoveToCurrentRoom = useCallback(() => {
+  const confirmMoveToCurrentRoom = useCallback(async () => {
     if (!pendingMoveCandidate) return;
 
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    const token = localStorage.getItem("token");
+
+    // Batch de grupo: mover N itens do grupo via endpoint dedicado
+    if (pendingMoveCandidate.itemGroup && groupMoveCount !== "") {
+      setSaving(true);
+      try {
+        const { data } = await axios.post(
+          `${API}/items/relocate-group`,
+          {
+            inventoryId,
+            itemGroupId: pendingMoveCandidate.itemGroup.id,
+            sourceSpaceId: pendingMoveCandidate.spaceId,
+            targetSpaceId: spaceId,
+            count: Number(groupMoveCount),
+          },
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+
+        setSearchResults((prev) =>
+          prev.filter((r) => r.id !== pendingMoveCandidate.id),
+        );
+        setSearchTerm("");
+        setPendingMoveCandidate(null);
+        setGroupMoveCount("");
+        // Recarrega os itens da sala para refletir os novos itens movidos
+        loadData(token, inventoryId);
+        showToast({
+          type: "success",
+          title: "Grupo realocado",
+          message:
+            data.message || `${data.movedCount} item(ns) movidos com sucesso.`,
+        });
+      } catch (err) {
+        showToast({
+          type: "error",
+          title: "Falha na realocação",
+          message:
+            err.response?.data?.error ||
+            "Não foi possível realocar os itens do grupo.",
+        });
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
+    // Realocação simples de item único
     setSaving(true);
     autoSave(() => {
-      const inventoryId = localStorage.getItem("activeInventoryId");
       enqueueAction({
         endpoint: "/items/relocate",
         method: "POST",
@@ -438,6 +580,7 @@ export default function RoomPage() {
       );
       setSearchTerm("");
       setPendingMoveCandidate(null);
+      setGroupMoveCount("");
       setSaving(false);
       showToast({
         type: "success",
@@ -445,7 +588,7 @@ export default function RoomPage() {
         message: "A realocação foi enviada para sincronização.",
       });
     });
-  }, [autoSave, pendingMoveCandidate, showToast, spaceId]);
+  }, [autoSave, groupMoveCount, pendingMoveCandidate, showToast, spaceId]);
 
   const handleMoveToCurrentRoom = (candidate) => {
     setPendingMoveCandidate(candidate);
@@ -709,6 +852,7 @@ export default function RoomPage() {
             100,
         )
       : 0;
+  const startBadge = getSpaceStartBadge(space);
   const hasStateFilters = !showFoundItems || !showRelocatedItems;
 
   return (
@@ -725,6 +869,11 @@ export default function RoomPage() {
               <p className="text-sm text-gray-500">
                 Resp: {space.responsibleDisplay || space.responsible}
               </p>
+              <span
+                className={`mt-2 inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${startBadge.className}`}
+              >
+                {startBadge.label}
+              </span>
             </div>
             <button
               onClick={() => router.push("/dashboard")}
@@ -1114,7 +1263,358 @@ export default function RoomPage() {
                 : "Nenhum item disponível para exibição."}
           </div>
         ) : activeTab === "itens" ? (
-          filteredItems.map((item) => {
+          displayRows.map((row) => {
+            if (row.type === "group") {
+              const isExpanded = expandedGroups[row.groupId];
+              const foundCount = row.items.filter(
+                (i) => i.statusEncontrado === "SIM",
+              ).length;
+              const totalCount = row.items.length;
+              const allFound = foundCount === totalCount;
+              const relocatedCount = row.items.filter(
+                (i) => i.meta?.isRelocated,
+              ).length;
+
+              return (
+                <div key={`group-${row.groupId}`} className="relative">
+                  {/* Stack shadow cards */}
+                  <div
+                    className="absolute inset-x-0 top-2 h-full bg-white rounded-xl shadow border border-gray-200 opacity-60"
+                    style={{ transform: "translateY(4px) scale(0.98)" }}
+                  />
+                  <div
+                    className="absolute inset-x-0 top-2 h-full bg-white rounded-xl shadow border border-gray-200 opacity-30"
+                    style={{ transform: "translateY(8px) scale(0.96)" }}
+                  />
+
+                  {/* Main group card */}
+                  <div
+                    className={`relative bg-white rounded-xl shadow border-l-4 transition-all ${
+                      allFound
+                        ? "border-green-500"
+                        : relocatedCount > 0
+                          ? "border-indigo-500"
+                          : "border-indigo-400"
+                    }`}
+                  >
+                    <div
+                      className="p-5 cursor-pointer select-none"
+                      onClick={() =>
+                        setExpandedGroups((prev) => ({
+                          ...prev,
+                          [row.groupId]: !prev[row.groupId],
+                        }))
+                      }
+                    >
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            <span className="text-indigo-600 text-lg">🗂</span>
+                            <span className="font-bold text-lg text-indigo-800">
+                              {row.groupName}
+                            </span>
+                            <span className="px-2 py-0.5 bg-indigo-100 text-indigo-700 text-xs rounded-full font-medium">
+                              Grupo · {totalCount} itens
+                            </span>
+                            {relocatedCount > 0 && (
+                              <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium">
+                                ⚠️ {relocatedCount} movido
+                                {relocatedCount !== 1 ? "s" : ""}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-sm text-gray-500">
+                            {allFound ? (
+                              <span className="text-green-600 font-medium">
+                                ✓ Todos encontrados
+                              </span>
+                            ) : (
+                              <>
+                                <span className="text-green-600 font-medium">
+                                  {foundCount} encontrado
+                                  {foundCount !== 1 ? "s" : ""}
+                                </span>{" "}
+                                de {totalCount}
+                              </>
+                            )}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {!allFound && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const inventoryId =
+                                  localStorage.getItem("activeInventoryId");
+                                const itemsToCheck = row.items.filter(
+                                  (i) => i.statusEncontrado !== "SIM",
+                                );
+                                // Enqueue all API calls upfront (no debounce interference)
+                                itemsToCheck.forEach((i) => {
+                                  enqueueAction({
+                                    endpoint: "/items/check",
+                                    method: "POST",
+                                    payload: {
+                                      itemId: i.id,
+                                      condicao: i.condicaoVisual || "EXCELENTE",
+                                      inventoryId,
+                                    },
+                                  });
+                                });
+                                // Single batch state update
+                                setItems((prev) =>
+                                  prev.map((i) => {
+                                    if (
+                                      itemsToCheck.some((tc) => tc.id === i.id)
+                                    ) {
+                                      return {
+                                        ...i,
+                                        statusEncontrado: "SIM",
+                                        condicaoVisual:
+                                          i.condicaoVisual || "EXCELENTE",
+                                        meta: { ...i.meta, isRelocated: false },
+                                      };
+                                    }
+                                    return i;
+                                  }),
+                                );
+                                // Register history for each found item
+                                itemsToCheck.forEach((i) => {
+                                  registerLocalHistoryAction({
+                                    action: "ENCONTRADO",
+                                    item: i,
+                                  });
+                                });
+                              }}
+                              className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700 font-medium"
+                            >
+                              ✅ Encontrar tudo
+                            </button>
+                          )}
+                          {relocatedCount > 0 && (
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                for (const i of row.items.filter(
+                                  (i) => i.meta?.isRelocated,
+                                )) {
+                                  await handleUndoLastAction(i);
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-slate-100 text-slate-700 rounded-lg text-xs hover:bg-slate-200 font-medium border border-slate-300"
+                            >
+                              ↩️ Desfazer movimentação
+                            </button>
+                          )}
+                          {allFound && (
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                for (const i of row.items.filter(
+                                  (i) => i.statusEncontrado === "SIM",
+                                )) {
+                                  await handleUndoLastAction(i);
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-slate-100 text-slate-700 rounded-lg text-xs hover:bg-slate-200 font-medium border border-slate-300"
+                            >
+                              ↩️ Desfazer tudo
+                            </button>
+                          )}
+                          <span className="text-sm text-gray-400">
+                            {isExpanded ? "▲ Recolher" : "▼ Expandir"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Expanded individual items */}
+                    {isExpanded && (
+                      <div className="border-t px-4 pb-4 pt-3 space-y-3">
+                        {row.items.map((item) => {
+                          const formattedValue =
+                            item.valor != null
+                              ? `R$ ${Number(item.valor).toFixed(2)}`
+                              : "N/A";
+                          const formattedDataAquisicao = item.dataAquisicao
+                            ? new Date(item.dataAquisicao).toLocaleDateString(
+                                "pt-BR",
+                              )
+                            : "N/A";
+                          const canUndoAction =
+                            item?.meta?.isRelocated ||
+                            item?.statusEncontrado === "SIM";
+
+                          return (
+                            <div
+                              key={item.id}
+                              className={`bg-gray-50 rounded-lg border-l-4 transition-all ${
+                                item.meta?.isRelocated
+                                  ? "border-yellow-500 bg-yellow-50"
+                                  : item.statusEncontrado === "SIM"
+                                    ? "border-green-500"
+                                    : "border-gray-300"
+                              }`}
+                            >
+                              <div className="p-4">
+                                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                  <div
+                                    className="flex-1 cursor-pointer"
+                                    onClick={() =>
+                                      setExpandedItem(
+                                        expandedItem === item.id
+                                          ? null
+                                          : item.id,
+                                      )
+                                    }
+                                  >
+                                    <div className="flex items-center gap-2 mb-1">
+                                      <span className="font-bold text-base">
+                                        #{item.patrimonio}
+                                      </span>
+                                      {item.meta?.isRelocated && (
+                                        <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
+                                          ⚠️ Movido de {item.meta.fromSpaceName}
+                                        </span>
+                                      )}
+                                      {item.statusEncontrado === "SIM" && (
+                                        <span className="text-green-600 text-sm">
+                                          ✓
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-gray-600 text-xs line-clamp-1">
+                                      {item.descricao}
+                                    </p>
+                                  </div>
+
+                                  <div className="flex flex-wrap gap-2 lg:justify-end">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleCheck(
+                                          item.id,
+                                          item.condicaoVisual || "EXCELENTE",
+                                        );
+                                      }}
+                                      className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700"
+                                    >
+                                      ✅ Encontrado
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setRelocateModal(item);
+                                      }}
+                                      className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700"
+                                    >
+                                      ➡️ Mover
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setPendingUnfoundItem(item);
+                                      }}
+                                      className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs hover:bg-red-200"
+                                    >
+                                      🚫 Não localizado
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Inner expanded details */}
+                              {expandedItem === item.id && (
+                                <div className="px-4 pb-4 border-t pt-3">
+                                  <div className="space-y-1.5 mb-4 text-sm text-gray-700">
+                                    <p>
+                                      <span className="font-semibold">
+                                        Descrição:
+                                      </span>{" "}
+                                      {item.descricao}
+                                    </p>
+                                    <p>
+                                      <span className="font-semibold">
+                                        Valor:
+                                      </span>{" "}
+                                      {formattedValue} |{" "}
+                                      <span className="font-semibold">
+                                        Condição Original:
+                                      </span>{" "}
+                                      {item.condicaoOriginal || "N/A"}
+                                    </p>
+                                    <p>
+                                      <span className="font-semibold">
+                                        Código SIA:
+                                      </span>{" "}
+                                      {item.codigoSIA || "N/A"} |{" "}
+                                      <span className="font-semibold">
+                                        Fornecedor:
+                                      </span>{" "}
+                                      {item.fornecedor || "N/A"}
+                                    </p>
+                                    <p>
+                                      <span className="font-semibold">
+                                        Data Aquisição:
+                                      </span>{" "}
+                                      {formattedDataAquisicao} |{" "}
+                                      <span className="font-semibold">
+                                        Documento:
+                                      </span>{" "}
+                                      {item.documento || "N/A"}
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="mb-2 text-sm font-semibold text-gray-800">
+                                      🎨 Estado de Conservação:
+                                    </p>
+                                    <div className="flex flex-wrap gap-2 mb-4">
+                                      {["EXCELENTE", "BOM", "INSERVIVEL"].map(
+                                        (status) => (
+                                          <button
+                                            key={status}
+                                            onClick={() =>
+                                              handleCheck(item.id, status)
+                                            }
+                                            className={`py-1.5 px-3 rounded-lg text-sm font-medium transition ${
+                                              item.condicaoVisual === status
+                                                ? "bg-blue-600 text-white"
+                                                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                                            }`}
+                                          >
+                                            {status === "EXCELENTE"
+                                              ? "🟢 Ótimo"
+                                              : status === "BOM"
+                                                ? "🟡 Regular"
+                                                : "🔴 Ruim"}
+                                          </button>
+                                        ),
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    onClick={() => handleUndoLastAction(item)}
+                                    disabled={saving || !canUndoAction}
+                                    className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    ↩️ Desfazer
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            }
+
+            // row.type === "single"
+            const item = row.item;
             const formattedValue =
               item.valor != null
                 ? `R$ ${Number(item.valor).toFixed(2)}`
@@ -1321,11 +1821,27 @@ export default function RoomPage() {
             defaultValue=""
           >
             <option value="">Selecione um espaço...</option>
-            {filteredRelocationSpaces.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name} • {s.responsibleDisplay || s.responsible}
-              </option>
-            ))}
+            {filteredRelocationSpaces.map((s) => {
+              const startedLabel = s.startedAt
+                ? new Date(s.startedAt).toLocaleDateString("pt-BR")
+                : "--/--/--";
+              const startedBy =
+                s.startedByDisplay || s.startedBy || "usuário não identificado";
+              const statusLabel =
+                s.startedAt ||
+                s.executionStatus === "INICIADO" ||
+                s.executionStatus === "FINALIZADO" ||
+                s.isFinalized
+                  ? `Iniciado em ${startedLabel} por ${startedBy}`
+                  : "Não iniciado";
+
+              return (
+                <option key={s.id} value={s.id}>
+                  {s.name} • {s.responsibleDisplay || s.responsible} •{" "}
+                  {statusLabel}
+                </option>
+              );
+            })}
           </select>
           {filteredRelocationSpaces.length === 0 ? (
             <p className="text-sm text-amber-700 bg-amber-50 rounded-lg px-3 py-2">
@@ -1365,20 +1881,91 @@ export default function RoomPage() {
         variant="danger"
       />
 
-      <ConfirmModal
+      <Modal
         isOpen={Boolean(pendingMoveCandidate)}
-        onConfirm={confirmMoveToCurrentRoom}
-        onCancel={() => setPendingMoveCandidate(null)}
+        onClose={() => {
+          setPendingMoveCandidate(null);
+          setGroupMoveCount("");
+        }}
         title="Confirmar realocação"
-        message={
-          pendingMoveCandidate
-            ? `Deseja mover o patrimônio #${pendingMoveCandidate.patrimonio} para a sala atual (${space.name})? Origem atual: ${pendingMoveCandidate.spaceName}.`
-            : ""
-        }
-        confirmText="Mover item"
-        cancelText="Cancelar"
-        variant="warning"
-      />
+        size="md"
+      >
+        <ModalBody>
+          {pendingMoveCandidate && (
+            <div className="space-y-4">
+              <p className="text-sm text-slate-700">
+                Deseja mover o patrimônio{" "}
+                <span className="font-semibold">
+                  #{pendingMoveCandidate.patrimonio}
+                </span>{" "}
+                para a sala atual (
+                <span className="font-semibold">{space?.name}</span>)? Origem
+                atual:{" "}
+                <span className="font-semibold">
+                  {pendingMoveCandidate.spaceName}
+                </span>
+                .
+              </p>
+
+              {pendingMoveCandidate.itemGroup && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
+                  <div>
+                    <p className="text-sm font-semibold text-amber-900">
+                      Este item pertence a um grupo
+                    </p>
+                    <p className="mt-0.5 text-xs text-amber-800">
+                      Grupo:{" "}
+                      <span className="font-medium">
+                        {pendingMoveCandidate.itemGroup.name}
+                      </span>
+                      {" · "}
+                      {pendingMoveCandidate.itemGroup.totalItems} item(ns) no
+                      grupo
+                    </p>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-amber-900">
+                      Quantos itens deste grupo serão movidos nesta operação?
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max={pendingMoveCandidate.itemGroup.totalItems}
+                      value={groupMoveCount}
+                      onChange={(e) => setGroupMoveCount(e.target.value)}
+                      placeholder={`1 – ${pendingMoveCandidate.itemGroup.totalItems}`}
+                      className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm focus:border-amber-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => {
+              setPendingMoveCandidate(null);
+              setGroupMoveCount("");
+            }}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={confirmMoveToCurrentRoom}
+            disabled={
+              saving ||
+              (pendingMoveCandidate?.itemGroup && groupMoveCount === "")
+            }
+            className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
+          >
+            {saving ? "Movendo..." : "Mover item"}
+          </button>
+        </ModalFooter>
+      </Modal>
 
       <ConfirmModal
         isOpen={Boolean(pendingUnfoundItem)}

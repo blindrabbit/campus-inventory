@@ -52,6 +52,10 @@ const DASHBOARD_TABS = [
     id: "dados",
     label: "Dados",
   },
+  {
+    id: "criar-grupos",
+    label: "Criar Grupos",
+  },
 ];
 
 export default function DashboardPage() {
@@ -80,6 +84,20 @@ export default function DashboardPage() {
   const [searchingUsers, setSearchingUsers] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
   const [newMemberRole, setNewMemberRole] = useState("CONFERENTE");
+  const [allItems, setAllItems] = useState([]);
+  const [loadingItems, setLoadingItems] = useState(false);
+  const [groupedItems, setGroupedItems] = useState({});
+  const [expandedGroups, setExpandedGroups] = useState({});
+  const [selectedItems, setSelectedItems] = useState(new Set());
+  const [groupCreationModal, setGroupCreationModal] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [newGroupDescription, setNewGroupDescription] = useState("");
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [itemSearch, setItemSearch] = useState("");
+  const [itemGroups, setItemGroups] = useState([]);
+  const [loadingGroups, setLoadingGroups] = useState(false);
+  const [expandedCreatedGroups, setExpandedCreatedGroups] = useState({});
+  const [groupSubTab, setGroupSubTab] = useState("itens");
   const router = useRouter();
   const { showToast } = useToast();
 
@@ -90,12 +108,54 @@ export default function DashboardPage() {
 
   const visibleTabs = useMemo(() => {
     if (isInventoryAdmin) return DASHBOARD_TABS;
-    return DASHBOARD_TABS.filter((tab) => tab.id === "espacos");
+    // Usuários não-admin veem apenas a aba de espaços, mas também a aba de criar grupos
+    return DASHBOARD_TABS.filter(
+      (tab) => tab.id === "espacos" || tab.id === "criar-grupos",
+    );
   }, [isInventoryAdmin]);
+
+  const filteredGroupedItems = useMemo(() => {
+    const term = itemSearch.trim().toLowerCase();
+    if (!term) return groupedItems;
+    const result = {};
+    for (const [descricao, items] of Object.entries(groupedItems)) {
+      const matchedItems = items.filter(
+        (item) =>
+          item.patrimonio?.toLowerCase().includes(term) ||
+          descricao.toLowerCase().includes(term) ||
+          item.space?.name?.toLowerCase().includes(term),
+      );
+      if (matchedItems.length > 0) result[descricao] = matchedItems;
+    }
+    return result;
+  }, [groupedItems, itemSearch]);
 
   const hasAuditAccess = useMemo(() => {
     return user?.role === "ADMIN" || activeInventory?.role === "ADMIN_CICLO";
   }, [user, activeInventory]);
+
+  const sortedSpaces = useMemo(() => {
+    return [...spaces].sort((a, b) => {
+      const aStarted =
+        Boolean(a.startedAt) ||
+        a.executionStatus === "INICIADO" ||
+        a.executionStatus === "FINALIZADO" ||
+        a.isFinalized;
+      const bStarted =
+        Boolean(b.startedAt) ||
+        b.executionStatus === "INICIADO" ||
+        b.executionStatus === "FINALIZADO" ||
+        b.isFinalized;
+
+      if (aStarted !== bStarted) {
+        return aStarted ? 1 : -1;
+      }
+
+      return (a.name || "").localeCompare(b.name || "", "pt-BR", {
+        sensitivity: "base",
+      });
+    });
+  }, [spaces]);
 
   const formatSpaceExecutionStatus = (space) => {
     if (space.isFinalized || space.executionStatus === "FINALIZADO") {
@@ -162,6 +222,14 @@ export default function DashboardPage() {
     const tabIsVisible = visibleTabs.some((tab) => tab.id === activeTab);
     if (!tabIsVisible) {
       setActiveTab("espacos");
+    }
+
+    if (activeTab === "criar-grupos") {
+      const token = localStorage.getItem("token");
+      if (token) {
+        loadAllItems(token);
+        loadItemGroups(token);
+      }
     }
   }, [activeTab, visibleTabs]);
 
@@ -253,6 +321,144 @@ export default function DashboardPage() {
     localStorage.removeItem("activeInventoryId");
     localStorage.removeItem("activeInventory");
     router.push("/login");
+  };
+
+  const loadAllItems = async (token) => {
+    try {
+      setLoadingItems(true);
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const { data } = await axios.get(`${API}/items/all`, {
+        params: { inventoryId },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      // Agrupar itens por descricao e patrimonio range
+      const grouped = {};
+      const items = Array.isArray(data) ? data : [];
+
+      items.forEach((item) => {
+        const desc = item.descricao || "Sem descrição";
+        if (!grouped[desc]) {
+          grouped[desc] = [];
+        }
+        grouped[desc].push(item);
+      });
+
+      // Ordenar itens dentro de cada grupo por patrimonio
+      Object.keys(grouped).forEach((desc) => {
+        grouped[desc].sort((a, b) => {
+          const numA = parseInt(a.patrimonio) || 0;
+          const numB = parseInt(b.patrimonio) || 0;
+          return numA - numB;
+        });
+      });
+
+      setAllItems(items);
+      setGroupedItems(grouped);
+      setSelectedItems(new Set());
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha ao carregar itens",
+        message:
+          err.response?.data?.error ||
+          "Não foi possível carregar os itens do inventário.",
+      });
+    } finally {
+      setLoadingItems(false);
+    }
+  };
+
+  const loadItemGroups = async (token) => {
+    try {
+      setLoadingGroups(true);
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const { data } = await axios.get(`${API}/item-groups/all`, {
+        params: { inventoryId },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setItemGroups(Array.isArray(data) ? data : []);
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha ao carregar grupos",
+        message: err.response?.data?.error || "Não foi possível carregar os grupos.",
+      });
+    } finally {
+      setLoadingGroups(false);
+    }
+  };
+
+  const handleToggleItemSelection = (itemId) => {
+    const newSelected = new Set(selectedItems);
+    if (newSelected.has(itemId)) {
+      newSelected.delete(itemId);
+    } else {
+      newSelected.add(itemId);
+    }
+    setSelectedItems(newSelected);
+  };
+
+  const handleCreateGroup = async () => {
+    if (!newGroupName.trim()) {
+      showToast({
+        type: "error",
+        title: "Nome obrigatório",
+        message: "Digite um nome para o grupo.",
+      });
+      return;
+    }
+
+    if (selectedItems.size === 0) {
+      showToast({
+        type: "error",
+        title: "Selecione itens",
+        message: "Selecione pelo menos um item para criar o grupo.",
+      });
+      return;
+    }
+
+    try {
+      setCreatingGroup(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+
+      const itemIds = Array.from(selectedItems);
+
+      await axios.post(
+        `${API}/item-groups`,
+        {
+          name: newGroupName,
+          description: newGroupDescription,
+          itemIds,
+          inventoryId,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+
+      showToast({
+        type: "success",
+        title: "Grupo criado com sucesso",
+        message: `${selectedItems.size} item(ns) adicionados ao grupo "${newGroupName}".`,
+      });
+
+      setNewGroupName("");
+      setNewGroupDescription("");
+      setGroupCreationModal(false);
+      setSelectedItems(new Set());
+      await Promise.all([loadAllItems(token), loadItemGroups(token)]);
+      setGroupSubTab("grupos-criados");
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha ao criar grupo",
+        message: err.response?.data?.error || "Não foi possível criar o grupo.",
+      });
+    } finally {
+      setCreatingGroup(false);
+    }
   };
 
   const loadInventoryDetails = async (token, inventoryId) => {
@@ -778,7 +984,7 @@ export default function DashboardPage() {
           </div>
         ) : null}
 
-        {activeTab === "espacos" && spaces.length === 0 ? (
+        {activeTab === "espacos" && sortedSpaces.length === 0 ? (
           <div className="bg-white rounded-xl shadow-md p-12 text-center">
             <div className="text-6xl mb-4">📦</div>
             <h3 className="text-xl font-semibold text-gray-800 mb-2">
@@ -790,7 +996,7 @@ export default function DashboardPage() {
           </div>
         ) : activeTab === "espacos" ? (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {spaces.map((space) => {
+            {sortedSpaces.map((space) => {
               const executionStatus = formatSpaceExecutionStatus(space);
               return (
                 <div
@@ -876,7 +1082,294 @@ export default function DashboardPage() {
           </div>
         ) : null}
 
-        {activeTab !== "espacos" ? (
+        {activeTab === "criar-grupos" ? (
+          <section className="mt-10 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            {/* Sub-abas */}
+            <div className="mb-5 flex gap-2 border-b border-slate-200 pb-3">
+              <button
+                type="button"
+                onClick={() => setGroupSubTab("itens")}
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                  groupSubTab === "itens"
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+              >
+                Itens
+              </button>
+              <button
+                type="button"
+                onClick={() => setGroupSubTab("grupos-criados")}
+                className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
+                  groupSubTab === "grupos-criados"
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+              >
+                Grupos Criados
+                {itemGroups.length > 0 && (
+                  <span className={`rounded-full px-1.5 py-0.5 text-xs font-semibold ${
+                    groupSubTab === "grupos-criados" ? "bg-white/20 text-white" : "bg-slate-300 text-slate-700"
+                  }`}>
+                    {itemGroups.length}
+                  </span>
+                )}
+              </button>
+            </div>
+
+            {/* Sub-aba: Itens */}
+            {groupSubTab === "itens" && (
+              <div className="rounded-xl border border-slate-200 p-4">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">
+                      Criar grupo de itens
+                    </p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      Selecione os itens que deseja agrupar. Itens serão listados
+                      agrupados pela descrição e patrimônio.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (selectedItems.size > 0) {
+                        const selected = allItems.filter((i) => selectedItems.has(i.id));
+                        const descs = [...new Set(selected.map((i) => i.descricao).filter(Boolean))];
+                        if (descs.length === 1) setNewGroupName(descs[0]);
+                        setGroupCreationModal(true);
+                      } else {
+                        showToast({
+                          type: "error",
+                          title: "Nenhum item selecionado",
+                          message: "Selecione pelo menos um item para criar um grupo.",
+                        });
+                      }
+                    }}
+                    disabled={selectedItems.size === 0 || creatingGroup}
+                    className="whitespace-nowrap rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                  >
+                    {creatingGroup ? "Criando..." : `Criar Grupo (${selectedItems.size})`}
+                  </button>
+                </div>
+
+                <input
+                  value={itemSearch}
+                  onChange={(e) => setItemSearch(e.target.value)}
+                  placeholder="Buscar por patrimônio, descrição ou localização..."
+                  className="mb-4 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+
+                {loadingItems ? (
+                  <p className="py-8 text-center text-sm text-slate-600">Carregando itens...</p>
+                ) : Object.keys(filteredGroupedItems).length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-600">
+                    {itemSearch.trim() ? "Nenhum item encontrado para a busca." : "Nenhum item disponível no inventário."}
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {(() => {
+                      const allFilteredIds = Object.values(filteredGroupedItems).flat().map((i) => i.id);
+                      const allSelected = allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedItems.has(id));
+                      const someSelected = allFilteredIds.some((id) => selectedItems.has(id));
+                      return (
+                        <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
+                          <input
+                            type="checkbox"
+                            checked={allSelected}
+                            ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                            onChange={() => {
+                              setSelectedItems((prev) => {
+                                const next = new Set(prev);
+                                if (allSelected) {
+                                  allFilteredIds.forEach((id) => next.delete(id));
+                                } else {
+                                  allFilteredIds.forEach((id) => next.add(id));
+                                }
+                                return next;
+                              });
+                            }}
+                          />
+                          Selecionar todos ({allFilteredIds.length})
+                        </label>
+                      );
+                    })()}
+                    {Object.entries(filteredGroupedItems).sort((a, b) => b[1].length - a[1].length).map(([descricao, items]) => {
+                      const firstPatrimonio = parseInt(items[0]?.patrimonio) || 0;
+                      const lastPatrimonio = parseInt(items[items.length - 1]?.patrimonio) || 0;
+                      const isExpanded = expandedGroups[descricao];
+                      const groupIds = items.map((i) => i.id);
+                      const groupAllSelected = groupIds.every((id) => selectedItems.has(id));
+                      const groupSomeSelected = groupIds.some((id) => selectedItems.has(id));
+
+                      return (
+                        <div key={descricao} className="rounded-lg border border-slate-200 bg-slate-50">
+                          <div className="flex items-center px-4 py-3 hover:bg-slate-100">
+                            <input
+                              type="checkbox"
+                              checked={groupAllSelected}
+                              ref={(el) => { if (el) el.indeterminate = groupSomeSelected && !groupAllSelected; }}
+                              onChange={() => {
+                                setSelectedItems((prev) => {
+                                  const next = new Set(prev);
+                                  if (groupAllSelected) {
+                                    groupIds.forEach((id) => next.delete(id));
+                                  } else {
+                                    groupIds.forEach((id) => next.add(id));
+                                  }
+                                  return next;
+                                });
+                              }}
+                              className="mr-3 shrink-0"
+                            />
+                            <button
+                              onClick={() =>
+                                setExpandedGroups((prev) => ({ ...prev, [descricao]: !prev[descricao] }))
+                              }
+                              className="flex flex-1 items-center justify-between gap-2 text-left"
+                            >
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-semibold text-slate-600">
+                                    {isExpanded ? "▼" : "▶"}
+                                  </span>
+                                  <span className="font-semibold text-slate-900">{descricao}</span>
+                                </div>
+                                <p className="mt-1 text-xs text-slate-600">
+                                  Patrimônio #{firstPatrimonio} a #{lastPatrimonio} • {items.length} unidade(s)
+                                </p>
+                              </div>
+                              <span className="inline-flex items-center gap-2 rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700">
+                                {groupIds.filter((id) => selectedItems.has(id)).length}/{items.length}
+                              </span>
+                            </button>
+                          </div>
+
+                          {isExpanded && (
+                            <div className="border-t border-slate-200 bg-white">
+                              <div className="max-h-72 space-y-1 overflow-y-auto p-3">
+                                {items.map((item) => (
+                                  <label
+                                    key={item.id}
+                                    className="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 hover:bg-slate-50"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedItems.has(item.id)}
+                                      onChange={() => handleToggleItemSelection(item.id)}
+                                      className="mt-1"
+                                    />
+                                    <div className="flex-1 text-sm">
+                                      <p className="font-medium text-slate-900">#{item.patrimonio}</p>
+                                      <p className="text-xs text-slate-600">
+                                        {item.space?.name} • {item.condicaoVisual}
+                                      </p>
+                                    </div>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Sub-aba: Grupos Criados */}
+            {groupSubTab === "grupos-criados" && (
+              <div className="rounded-xl border border-slate-200 p-4">
+                {loadingGroups ? (
+                  <p className="py-8 text-center text-sm text-slate-500">Carregando grupos...</p>
+                ) : itemGroups.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-500">Nenhum grupo criado ainda.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {itemGroups.map((group) => {
+                      const isOpen = expandedCreatedGroups[group.id];
+                      const found = group.items.filter((i) => i.statusEncontrado === "SIM").length;
+                      return (
+                        <div key={group.id} className="rounded-lg border border-slate-200 bg-slate-50">
+                          <button
+                            onClick={() =>
+                              setExpandedCreatedGroups((prev) => ({ ...prev, [group.id]: !prev[group.id] }))
+                            }
+                            className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-slate-100"
+                          >
+                            <div className="flex-1">
+                              <p className="font-semibold text-slate-900">{group.name}</p>
+                              {group.description && (
+                                <p className="text-xs text-slate-500">{group.description}</p>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-slate-500">
+                                {found}/{group.items.length} encontrado(s)
+                              </span>
+                              <span className={`h-2 w-2 rounded-full ${
+                                found === group.items.length && group.items.length > 0
+                                  ? "bg-emerald-500"
+                                  : found > 0
+                                  ? "bg-amber-400"
+                                  : "bg-rose-400"
+                              }`} />
+                              <span className="text-xs font-semibold text-slate-500">
+                                {isOpen ? "▲" : "▼"}
+                              </span>
+                            </div>
+                          </button>
+
+                          {isOpen && (
+                            <div className="border-t border-slate-200 bg-white">
+                              {group.items.length === 0 ? (
+                                <p className="px-4 py-3 text-xs text-slate-500">Sem itens.</p>
+                              ) : (
+                                <div className="divide-y divide-slate-100">
+                                  {group.items.map((item) => (
+                                    <div
+                                      key={item.id}
+                                      className="flex items-center justify-between gap-3 px-4 py-2.5"
+                                    >
+                                      <div className="min-w-0">
+                                        <p className="text-sm font-medium text-slate-900">
+                                          #{item.patrimonio}
+                                        </p>
+                                        <p className="truncate text-xs text-slate-500">{item.descricao}</p>
+                                      </div>
+                                      <div className="flex shrink-0 flex-col items-end gap-1">
+                                        <span className="text-xs text-slate-600">
+                                          {item.space?.name || "Sem localização"}
+                                        </span>
+                                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                                          item.statusEncontrado === "SIM"
+                                            ? "bg-emerald-100 text-emerald-700"
+                                            : item.statusEncontrado === "NAO"
+                                            ? "bg-rose-100 text-rose-700"
+                                            : "bg-amber-100 text-amber-700"
+                                        }`}>
+                                          {item.statusEncontrado === "SIM"
+                                            ? "Encontrado"
+                                            : item.statusEncontrado === "NAO"
+                                            ? "Não localizado"
+                                            : "Pendente"}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        ) : activeTab !== "espacos" ? (
           <section className="mt-10 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
             {isInventoryAdmin ? (
               <div className="min-w-0 rounded-xl border border-slate-200 p-4">
@@ -1292,6 +1785,74 @@ export default function DashboardPage() {
             </button>
           </ModalFooter>
         </form>
+      </Modal>
+
+      <Modal
+        isOpen={groupCreationModal}
+        onClose={() => {
+          setGroupCreationModal(false);
+          setNewGroupName("");
+          setNewGroupDescription("");
+        }}
+      >
+        <ModalBody>
+          <div className="space-y-4">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">
+                Nome do Grupo *
+              </label>
+              <input
+                value={newGroupName}
+                onChange={(e) => setNewGroupName(e.target.value)}
+                placeholder="Ex: Carteiras da Sala 101"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">
+                Descrição (opcional)
+              </label>
+              <textarea
+                value={newGroupDescription}
+                onChange={(e) => setNewGroupDescription(e.target.value)}
+                placeholder="Descreva o propósito ou características do grupo..."
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                rows="3"
+              />
+            </div>
+            <div className="rounded-lg bg-slate-50 p-3">
+              <p className="text-xs font-semibold text-slate-700">
+                Itens selecionados: {selectedItems.size}
+              </p>
+              <p className="mt-1 text-xs text-slate-600">
+                Este grupo incluirá os {selectedItems.size} item(ns) que você
+                selecionou.
+              </p>
+            </div>
+          </div>
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => {
+              setGroupCreationModal(false);
+              setNewGroupName("");
+              setNewGroupDescription("");
+            }}
+            disabled={creatingGroup}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={handleCreateGroup}
+            disabled={creatingGroup || !newGroupName.trim()}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {creatingGroup ? "Criando grupo..." : "Criar Grupo"}
+          </button>
+        </ModalFooter>
       </Modal>
     </div>
   );

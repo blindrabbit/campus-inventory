@@ -41,6 +41,7 @@ model Inventory {
   items          Item[]
   users          InventoryUser[]
   statusHistory  InventoryStatusHistory[]
+  itemGroups     ItemGroup[]
 
   @@map("inventories")
 }
@@ -130,6 +131,10 @@ model Item {
   dataConferencia   DateTime?
   ultimoConferente  String?
   
+  // Grupos
+  itemGroupId       String?
+  itemGroup         ItemGroup? @relation(fields: [itemGroupId], references: [id], onDelete: SetNull)
+  
   // Relocações
   relocationIn      Relocation? @relation("ItemRelocation")
   history           ItemHistorico[]
@@ -160,6 +165,20 @@ model ItemHistorico {
   createdAt   DateTime @default(now())
 
   @@map("item_history")
+}
+
+model ItemGroup {
+  id          String   @id @default(cuid())
+  inventoryId String
+  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  items       Item[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([inventoryId])
+  @@map("item_groups")
 }
 
 model Relocation {

@@ -23,6 +23,32 @@ export default function SpaceSearchBar({
   const [activeIndex, setActiveIndex] = useState(-1);
   const [isLoading, setIsLoading] = useState(false);
 
+  const getExecutionBadge = (space) => {
+    const wasStarted =
+      Boolean(space.startedAt) ||
+      space.executionStatus === "INICIADO" ||
+      space.executionStatus === "FINALIZADO" ||
+      space.isFinalized;
+
+    if (wasStarted) {
+      const startedLabel = space.startedAt
+        ? new Date(space.startedAt).toLocaleDateString("pt-BR")
+        : "--/--/--";
+      const startedBy =
+        space.startedByDisplay || space.startedBy || "usuário não identificado";
+
+      return {
+        label: `Iniciado em ${startedLabel} por ${startedBy}`,
+        className: "bg-amber-100 text-amber-800",
+      };
+    }
+
+    return {
+      label: "Não iniciado",
+      className: "bg-rose-100 text-rose-700",
+    };
+  };
+
   useEffect(() => {
     tokenRef.current = localStorage.getItem("token");
   }, []);
@@ -65,9 +91,30 @@ export default function SpaceSearchBar({
           params: { q: term, inventoryId },
           headers: { Authorization: `Bearer ${token}` },
         });
-        setResults(data.slice(0, 10));
+        const ordered = [...data].sort((a, b) => {
+          const aStarted =
+            Boolean(a.startedAt) ||
+            a.executionStatus === "INICIADO" ||
+            a.executionStatus === "FINALIZADO" ||
+            a.isFinalized;
+          const bStarted =
+            Boolean(b.startedAt) ||
+            b.executionStatus === "INICIADO" ||
+            b.executionStatus === "FINALIZADO" ||
+            b.isFinalized;
+
+          if (aStarted !== bStarted) {
+            return aStarted ? 1 : -1;
+          }
+
+          return (a.name || "").localeCompare(b.name || "", "pt-BR", {
+            sensitivity: "base",
+          });
+        });
+
+        setResults(ordered.slice(0, 10));
         setIsOpen(true);
-        setActiveIndex(data.length > 0 ? 0 : -1);
+        setActiveIndex(ordered.length > 0 ? 0 : -1);
       } catch (error) {
         showToast({
           type: "error",
@@ -159,29 +206,39 @@ export default function SpaceSearchBar({
       {isOpen && results.length > 0 && (
         <div className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-40 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
           <div className="max-h-80 overflow-auto p-2">
-            {results.map((space, index) => (
-              <button
-                key={space.id}
-                type="button"
-                onClick={() => handleSelect(space)}
-                onMouseEnter={() => setActiveIndex(index)}
-                className={`flex w-full items-start justify-between gap-4 rounded-xl px-4 py-3 text-left transition ${
-                  index === activeIndex ? "bg-sky-50" : "hover:bg-slate-50"
-                }`}
-              >
-                <div className="min-w-0">
-                  <p className="truncate font-semibold text-slate-900">
-                    {space.name}
-                  </p>
-                  <p className="mt-1 truncate text-xs text-slate-500">
-                    {space.responsible || "Não informado"}
-                  </p>
-                </div>
-                <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
-                  {space.itemCount} itens
-                </span>
-              </button>
-            ))}
+            {results.map((space, index) => {
+              const executionBadge = getExecutionBadge(space);
+              return (
+                <button
+                  key={space.id}
+                  type="button"
+                  onClick={() => handleSelect(space)}
+                  onMouseEnter={() => setActiveIndex(index)}
+                  className={`flex w-full items-start justify-between gap-4 rounded-xl px-4 py-3 text-left transition ${
+                    index === activeIndex ? "bg-sky-50" : "hover:bg-slate-50"
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold text-slate-900">
+                      {space.name}
+                    </p>
+                    <p className="mt-1 truncate text-xs text-slate-500">
+                      {space.responsibleDisplay ||
+                        space.responsible ||
+                        "Não informado"}
+                    </p>
+                    <span
+                      className={`mt-2 inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold ${executionBadge.className}`}
+                    >
+                      {executionBadge.label}
+                    </span>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+                    {space.itemCount} itens
+                  </span>
+                </button>
+              );
+            })}
           </div>
           {selectedLabel ? (
             <div className="border-t border-slate-100 px-4 py-2 text-xs text-slate-500">

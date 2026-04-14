@@ -68,6 +68,7 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
             pendingConfirm: true,
           },
         },
+        itemGroup: { select: { id: true, name: true } },
       },
     });
 
@@ -85,6 +86,8 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
       condicaoVisual: item.condicaoVisual,
       dataConferencia: item.dataConferencia,
       ultimoConferente: item.ultimoConferente,
+      itemGroupId: item.itemGroup?.id || null,
+      groupName: item.itemGroup?.name || null,
       meta: item.relocationIn
         ? {
             isRelocated: true,
@@ -98,6 +101,29 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
     res.json(formatted);
   } catch (err) {
     console.error("Error fetching items:", err);
+    res.status(500).json({ error: "Erro ao carregar itens" });
+  }
+});
+
+router.get("/all", verifyJWT, requireInventoryAccess(), async (req, res) => {
+  try {
+    const items = await prisma.item.findMany({
+      where: { inventoryId: req.inventoryId },
+      select: {
+        id: true,
+        patrimonio: true,
+        descricao: true,
+        spaceId: true,
+        statusEncontrado: true,
+        condicaoVisual: true,
+        space: { select: { id: true, name: true } },
+      },
+      orderBy: { patrimonio: "asc" },
+    });
+
+    res.json(items);
+  } catch (err) {
+    console.error("Error fetching all items:", err);
     res.status(500).json({ error: "Erro ao carregar itens" });
   }
 });
@@ -132,6 +158,14 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
             name: true,
           },
         },
+        itemGroupId: true,
+        itemGroup: {
+          select: {
+            id: true,
+            name: true,
+            _count: { select: { items: true } },
+          },
+        },
       },
       take: 20,
       orderBy: { patrimonio: "asc" },
@@ -144,6 +178,10 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
         descricao: item.descricao,
         spaceId: item.spaceId,
         spaceName: item.space?.name || "Sem localização",
+        itemGroupId: item.itemGroupId || null,
+        itemGroup: item.itemGroup
+          ? { id: item.itemGroup.id, name: item.itemGroup.name, totalItems: item.itemGroup._count.items }
+          : null,
       })),
     );
   } catch (err) {
@@ -262,7 +300,7 @@ router.post(
   requireInventoryOperationalWrite(),
   async (req, res) => {
     try {
-      const { itemId, targetSpaceId } = req.body;
+      const { itemId, targetSpaceId, groupMoveCount } = req.body;
       const user = req.user;
 
       const item = await prisma.item.findUnique({
@@ -336,6 +374,9 @@ router.post(
           toSpaceId: targetSpaceId,
           action: "REALOCADO",
           createdBy: user.sub,
+          metadata: groupMoveCount != null
+            ? JSON.stringify({ groupMoveCount: Number(groupMoveCount) })
+            : null,
         });
       });
 
@@ -355,6 +396,109 @@ router.post(
     }
   },
 );
+
+router.post(
+  "/relocate-group",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const { itemGroupId, sourceSpaceId, targetSpaceId, count } = req.body;
+      const user = req.user;
+
+      if (!itemGroupId || !sourceSpaceId || !targetSpaceId || !count) {
+        return res.status(400).json({
+          error: "itemGroupId, sourceSpaceId, targetSpaceId e count são obrigatórios",
+        });
+      }
+
+      const qty = Number(count);
+      if (!Number.isInteger(qty) || qty < 1) {
+        return res.status(400).json({ error: "count deve ser um inteiro positivo" });
+      }
+
+      const [targetSpace, items] = await Promise.all([
+        prisma.space.findFirst({
+          where: { id: targetSpaceId, inventoryId: req.inventoryId },
+          select: { id: true },
+        }),
+        prisma.item.findMany({
+          where: { inventoryId: req.inventoryId, itemGroupId, spaceId: sourceSpaceId },
+          select: { id: true },
+          take: qty,
+        }),
+      ]);
+
+      if (!targetSpace) {
+        return res.status(400).json({ error: "Espaço de destino inválido" });
+      }
+
+      if (items.length === 0) {
+        return res.status(404).json({
+          error: "Nenhum item do grupo encontrado no espaço de origem",
+        });
+      }
+
+      const movedAt = new Date();
+      const itemIds = items.map((i) => i.id);
+
+      const relocationData = itemIds.map((itemId) => ({
+        itemId,
+        fromSpaceId: sourceSpaceId,
+        toSpaceId: targetSpaceId,
+        movedBy: user.sub,
+        movedAt,
+        pendingConfirm: true,
+      }));
+
+      await prisma.$transaction([
+        prisma.item.updateMany({
+          where: { id: { in: itemIds }, inventoryId: req.inventoryId },
+          data: {
+            spaceId: targetSpaceId,
+            lastKnownSpaceId: sourceSpaceId,
+            statusEncontrado: "PENDENTE",
+          },
+        }),
+        prisma.relocation.deleteMany({
+          where: { itemId: { in: itemIds } },
+        }),
+        prisma.relocation.createMany({
+          data: relocationData,
+        }),
+        prisma.itemHistorico.createMany({
+          data: itemIds.map((itemId) => ({
+            itemId,
+            fromSpaceId: sourceSpaceId,
+            toSpaceId: targetSpaceId,
+            action: "REALOCADO",
+            createdBy: user.sub,
+            metadata: JSON.stringify({ groupBatch: true, groupMoveCount: qty }),
+            createdAt: movedAt,
+          })),
+        }),
+      ]);
+
+      await markSpaceStarted(prisma, {
+        inventoryId: req.inventoryId,
+        spaceId: sourceSpaceId,
+        user,
+      });
+
+      res.json({
+        success: true,
+        movedCount: items.length,
+        message: `${items.length} item(ns) do grupo realocados com sucesso`,
+      });
+    } catch (err) {
+      console.error("Error relocating group items:", err);
+      res.status(500).json({ error: "Erro ao realocar itens do grupo" });
+    }
+  },
+);
+
 
 router.post(
   "/unfound",

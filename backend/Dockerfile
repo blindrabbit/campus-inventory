@@ -18,4 +18,4 @@ COPY . .
 RUN mkdir -p /app/data
 
 EXPOSE 8000
-CMD ["sh", "-c", "pnpm prisma generate && pnpm run dev"]
+CMD ["sh", "-c", "pnpm prisma generate && pnpm prisma migrate deploy && pnpm run dev"]
