@@ -84,6 +84,20 @@ const authenticateWithFallback = async (sAMAccountName, password) => {
   return false;
 };
 
+const USER_ATTRIBUTES = [
+  "dn",
+  "distinguishedName",
+  "sAMAccountName",
+  "givenName",
+  "sn",
+  "cn",
+  "displayName",
+  "name",
+  "mail",
+  "employeeID",
+  "uid",
+];
+
 const findUserByAttribute = async (attribute, value) => {
   const term = value?.toString().trim();
   if (!term) return null;
@@ -93,6 +107,7 @@ const findUserByAttribute = async (attribute, value) => {
       {
         filter: `(${attribute}=${escapeLdapFilter(term)})`,
         includeMembership: [],
+        attributes: USER_ATTRIBUTES,
       },
       (err, result) => {
         const user = result?.users?.[0];
@@ -110,7 +125,12 @@ const normalizeDirectoryUser = (user, fallbackSamAccountName) => {
   if (!user) return null;
 
   const samAccountName = user.sAMAccountName || fallbackSamAccountName || null;
-  const fullName = user.cn || user.displayName || user.name || null;
+  const givenName = user.givenName?.toString().trim() || null;
+  const sn = user.sn?.toString().trim() || null;
+  const fullName =
+    givenName && sn
+      ? `${givenName} ${sn}`
+      : givenName || user.cn || user.displayName || user.name || null;
 
   if (!samAccountName) {
     return null;
@@ -185,6 +205,7 @@ const findDirectoryUserByIdentifier = async (identifier) => {
       {
         filter: `(|(sAMAccountName=${escapeLdapFilter(term)})(employeeID=${escapeLdapFilter(term)})(uid=${escapeLdapFilter(term)})(cn=*${escapeLdapFilter(term)}*)(displayName=*${escapeLdapFilter(term)}*))`,
         includeMembership: ["user"],
+        attributes: USER_ATTRIBUTES,
       },
       (err, result) => {
         const user = result?.users?.[0];
@@ -204,6 +225,7 @@ const findDirectoryUsersByExactFilter = async (filter) => {
       {
         filter,
         includeMembership: [],
+        attributes: USER_ATTRIBUTES,
       },
       (err, result) => {
         if (err || !result?.users) {
@@ -429,20 +451,30 @@ export const searchDirectoryUsers = async (query, limit = 10) => {
   if (!filter) return [];
 
   return new Promise((resolve) => {
-    ad.findUsers(filter, false, (err, users) => {
+    ad.findUsers(
+      { filter, attributes: USER_ATTRIBUTES },
+      false,
+      (err, users) => {
       if (err || !users) {
         return resolve([]);
       }
 
       const mapped = users
-        .map((user) => ({
-          sAMAccountName: user.sAMAccountName,
-          employeeID: user.employeeID || null,
-          uid: user.uid || null,
-          fullName:
-            user.cn || user.displayName || user.name || user.givenName || null,
-          email: user.mail || null,
-        }))
+        .map((user) => {
+          const givenName = user.givenName?.toString().trim() || null;
+          const sn = user.sn?.toString().trim() || null;
+          const fullName =
+            givenName && sn
+              ? `${givenName} ${sn}`
+              : givenName || user.cn || user.displayName || user.name || null;
+          return {
+            sAMAccountName: user.sAMAccountName,
+            employeeID: user.employeeID || null,
+            uid: user.uid || null,
+            fullName,
+            email: user.mail || null,
+          };
+        })
         .filter((user) => Boolean(user.sAMAccountName));
 
       const dedup = new Map();

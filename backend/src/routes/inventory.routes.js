@@ -122,11 +122,11 @@ const normalizeSourceType = (value) => {
 };
 
 const resolveOrSyncLocalUserBySam = async (samAccountName) => {
-  const normalizedSam = samAccountName?.toString().trim();
+  const normalizedSam = samAccountName?.toString().trim().toLowerCase();
   if (!normalizedSam) return null;
 
-  const user = await prisma.user.findUnique({
-    where: { samAccountName: normalizedSam },
+  const user = await prisma.user.findFirst({
+    where: { samAccountName: { equals: normalizedSam } },
   });
 
   if (user) {
@@ -138,10 +138,11 @@ const resolveOrSyncLocalUserBySam = async (samAccountName) => {
     return null;
   }
 
-  const resolvedSam =
+  const resolvedSam = (
     directoryUser.sAMAccountName ||
     directoryUser.samAccountName ||
-    normalizedSam;
+    normalizedSam
+  ).toLowerCase();
   const resolvedFullName = directoryUser.fullName || resolvedSam;
 
   return prisma.user.create({
@@ -810,6 +811,7 @@ router.get("/users/search", verifyJWT, async (req, res) => {
           userId: user.id,
           samAccountName: user.samAccountName,
           fullName: user.fullName,
+          givenName: user.fullName?.split(" ")[0] || user.fullName,
           existsLocally: true,
         })),
       });
@@ -823,6 +825,8 @@ router.get("/users/search", verifyJWT, async (req, res) => {
         userId: null,
         samAccountName: user.sAMAccountName,
         fullName: user.fullName || user.sAMAccountName,
+        givenName:
+          user.fullName?.split(" ")[0] || user.fullName || user.sAMAccountName,
         existsLocally: false,
       })),
     });
@@ -1741,6 +1745,7 @@ router.get(
           userId: user.id,
           samAccountName: user.samAccountName,
           fullName: user.fullName,
+          givenName: user.fullName?.split(" ")[0] || user.fullName,
           existsLocally: true,
           alreadyLinked: user.inventoryLinks.length > 0,
           inventoryRole: user.inventoryLinks[0]?.role || null,
@@ -1765,7 +1770,7 @@ router.post(
   requireInventoryRoles("ADMIN_CICLO"),
   async (req, res) => {
     try {
-      const samAccountName = req.body?.samAccountName?.toString().trim();
+      const samAccountName = req.body?.samAccountName?.toString().trim().toLowerCase();
       const requestedRole = req.body?.role?.toString().trim() || "CONFERENTE";
 
       if (!samAccountName) {
@@ -1776,8 +1781,8 @@ router.post(
         return res.status(400).json({ error: "Perfil de inventário inválido" });
       }
 
-      let user = await prisma.user.findUnique({
-        where: { samAccountName },
+      let user = await prisma.user.findFirst({
+        where: { samAccountName: { equals: samAccountName } },
       });
 
       if (!user) {
@@ -1790,7 +1795,7 @@ router.post(
 
         user = await prisma.user.create({
           data: {
-            samAccountName: directoryUser.sAMAccountName,
+            samAccountName: (directoryUser.sAMAccountName || samAccountName).toLowerCase(),
             fullName: directoryUser.fullName || directoryUser.sAMAccountName,
             role: "CONFERENTE",
           },

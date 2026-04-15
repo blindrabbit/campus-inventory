@@ -207,10 +207,10 @@ export default function AdminUsersPage() {
             <div className="flex items-center gap-3 self-start lg:self-auto">
               <div className="text-right">
                 <p className="text-sm font-semibold text-gray-800">
-                  {user?.fullName}
+                  {user?.samAccountName} - {user?.fullName?.split(" ")[0] || user?.fullName}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {user?.samAccountName} • {user?.role}
+                  {user?.role}
                 </p>
               </div>
               <button
@@ -272,10 +272,10 @@ export default function AdminUsersPage() {
                 <div className="mb-4 flex items-start justify-between gap-3">
                   <div>
                     <h3 className="text-lg font-semibold text-slate-900">
-                      {entry.fullName}
+                      {entry.samAccountName} - {entry.fullName}
                     </h3>
                     <p className="text-xs text-slate-500">
-                      {entry.samAccountName} • {entry.globalRole}
+                      {entry.globalRole}
                     </p>
                   </div>
                   <button

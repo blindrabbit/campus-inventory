@@ -10,6 +10,9 @@
     "test": "node --test",
     "seed": "node scripts/seed-xlsx.js",
     "promote-admin": "node scripts/promote-admin.js",
+    "sync-ad-fullnames": "node scripts/sync-ad-fullnames.js",
+    "dedup-sam-accounts": "node scripts/dedup-sam-accounts.js",
+    "flush-database": "node scripts/flush-database.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev"
   },

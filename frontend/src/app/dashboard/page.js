@@ -988,10 +988,10 @@ export default function DashboardPage() {
             <div className="flex items-center gap-4 self-start lg:self-auto">
               <div className="text-right">
                 <p className="text-sm font-semibold text-gray-800">
-                  {user?.fullName}
+                  {user?.samAccountName} - {user?.fullName?.split(" ")[0] || user?.fullName}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {user?.samAccountName} • {activeInventory?.role || user?.role}
+                  {activeInventory?.role || user?.role}
                 </p>
               </div>
               <button
@@ -1628,10 +1628,7 @@ export default function DashboardPage() {
                                 >
                                   <td className="px-3 py-2">
                                     <p className="font-medium text-slate-900">
-                                      {result.fullName}
-                                    </p>
-                                    <p className="text-xs text-slate-500">
-                                      {result.samAccountName}
+                                      {result.samAccountName} - {result.givenName || result.fullName?.split(" ")[0] || result.fullName}
                                     </p>
                                   </td>
                                   <td className="px-3 py-2 text-xs text-slate-600">
@@ -1691,10 +1688,7 @@ export default function DashboardPage() {
                                 >
                                   <td className="px-3 py-2">
                                     <p className="font-medium text-slate-900">
-                                      {member.fullName}
-                                    </p>
-                                    <p className="text-xs text-slate-500">
-                                      {member.samAccountName}
+                                      {member.samAccountName} - {member.fullName?.split(" ")[0] || member.fullName}
                                     </p>
                                   </td>
                                   <td className="px-3 py-2">
@@ -1774,8 +1768,9 @@ export default function DashboardPage() {
                         <div className="text-sm text-slate-700">
                           Responsável principal
                           <p className="mt-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                            {inventoryDetails?.owner?.fullName ||
-                              "Não informado"}
+                            {inventoryDetails?.owner
+                              ? `${inventoryDetails.owner.samAccountName} - ${inventoryDetails.owner.fullName?.split(" ")[0] || inventoryDetails.owner.fullName}`
+                              : "Não informado"}
                           </p>
                         </div>
 

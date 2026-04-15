@@ -836,7 +836,7 @@ export default function NewInventoryPage() {
           {ownerSelection ? (
             <div className="rounded-lg bg-slate-50 p-3 text-xs text-slate-700 ring-1 ring-slate-200">
               Responsável selecionado: {ownerSelection.samAccountName} -{" "}
-              {ownerSelection.fullName}
+              {ownerSelection.fullName?.split(" ")[0] || ownerSelection.fullName}
             </div>
           ) : null}
 
@@ -884,7 +884,7 @@ export default function NewInventoryPage() {
               {pendingMember ? (
                 <p className="text-xs text-slate-600">
                   Selecionado: {pendingMember.samAccountName} -{" "}
-                  {pendingMember.fullName}
+                  {pendingMember.fullName?.split(" ")[0] || pendingMember.fullName}
                 </p>
               ) : null}
             </div>
@@ -897,8 +897,8 @@ export default function NewInventoryPage() {
                     className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700"
                   >
                     <span>
-                      {member.samAccountName} ({member.fullName}) -{" "}
-                      {member.role}
+                      {member.samAccountName} -{" "}
+                      {member.fullName?.split(" ")[0] || member.fullName} ({member.role})
                     </span>
                     <button
                       type="button"

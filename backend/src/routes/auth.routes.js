@@ -35,7 +35,7 @@ router.post("/login", loginLimiter, async (req, res) => {
       return res.status(401).json({ error: "Credenciais inválidas" });
     }
 
-    const normalizedSam = loginSam;
+    const normalizedSam = loginSam.toLowerCase();
 
     let resolvedFullName = userData.fullName?.toString().trim() || null;
 

@@ -110,9 +110,10 @@ export default function UserLookupSelect({
             <option value="">Selecione...</option>
             {results.map((user) => {
               const key = `${user.samAccountName}::${user.fullName}`;
+              const givenName = user.givenName || user.fullName?.split(" ")[0] || user.fullName;
               return (
                 <option key={key} value={key}>
-                  {user.samAccountName} - {user.fullName}
+                  {user.samAccountName} - {givenName}
                 </option>
               );
             })}

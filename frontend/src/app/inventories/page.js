@@ -110,10 +110,10 @@ export default function InventoriesPage() {
             <div className="flex items-center gap-4 self-start lg:self-auto">
               <div className="text-right">
                 <p className="text-sm font-semibold text-gray-800">
-                  {user?.fullName}
+                  {user?.samAccountName} - {user?.fullName?.split(" ")[0] || user?.fullName}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {user?.samAccountName} • {user?.role}
+                  {user?.role}
                 </p>
               </div>
               {canCreateInventory() ? (
