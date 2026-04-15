@@ -131,7 +131,24 @@ export default function UnfoundItemsPage() {
     }
   };
 
-  const filteredItems = useMemo(() => items, [items]);
+  const filteredItems = useMemo(() => {
+    const getItemOrderPriority = (item) => {
+      if (item?.statusAtual === "MOVIDO_PENDENTE_ACEITE") return 0;
+      if (item?.statusAtual === "SIM" || item?.statusAtual === "ENCONTRADO")
+        return 2;
+      return 1;
+    };
+
+    return [...items].sort((a, b) => {
+      const priorityDiff = getItemOrderPriority(a) - getItemOrderPriority(b);
+      if (priorityDiff !== 0) return priorityDiff;
+
+      return (a?.patrimonio || "").localeCompare(b?.patrimonio || "", "pt-BR", {
+        numeric: true,
+        sensitivity: "base",
+      });
+    });
+  }, [items]);
 
   const refreshAudit = async () => {
     const token = localStorage.getItem("token");

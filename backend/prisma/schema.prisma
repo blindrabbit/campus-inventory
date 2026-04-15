@@ -96,6 +96,8 @@ model Space {
   relocationIn  Relocation[] @relation("RelocationTarget")
   historyFrom   ItemHistorico[] @relation("HistoricoFromSpace")
   historyTo     ItemHistorico[] @relation("HistoricoToSpace")
+  verificationRolls VerificationRoll[]
+  finalizationHistory FinalizationHistory[]
   
   @@map("spaces")
 }
@@ -130,7 +132,12 @@ model Item {
   condicaoVisual    String?
   dataConferencia   DateTime?
   ultimoConferente  String?
-  
+
+  // Verificação (Revisor)
+  verificationStatus String?   // "REVERIFICAR" during review, cleared after check
+  verifiedAt        DateTime?
+  verifiedBy        String?
+
   // Grupos
   itemGroupId       String?
   itemGroup         ItemGroup? @relation(fields: [itemGroupId], references: [id], onDelete: SetNull)
@@ -185,16 +192,45 @@ model Relocation {
   id              String   @id @default(cuid())
   itemId          String   @unique
   item            Item     @relation("ItemRelocation", fields: [itemId], references: [id], onDelete: Cascade)
-  
+
   fromSpaceId     String
   fromSpace       Space    @relation("RelocationSource", fields: [fromSpaceId], references: [id])
-  
+
   toSpaceId       String
   toSpace         Space    @relation("RelocationTarget", fields: [toSpaceId], references: [id])
-  
+
   movedBy         String
   movedAt         DateTime @default(now())
   pendingConfirm  Boolean  @default(true)
-  
+
   @@map("relocations")
+}
+
+model VerificationRoll {
+  id          String    @id @default(cuid())
+  spaceId     String
+  space       Space     @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  itemIds     String    @default("[]")  // JSON array of selected item IDs
+  selectedAt  DateTime  @default(now())
+  reviewedAt  DateTime?
+  result      String    @default("PENDING") // "PASSED", "FAILED", "REVERTED"
+  reason      String?
+  createdBy   String
+  updatedAt   DateTime  @updatedAt
+
+  @@index([spaceId])
+  @@map("verification_rolls")
+}
+
+model FinalizationHistory {
+  id        String   @id @default(cuid())
+  spaceId   String
+  space     Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  action    String   // "FINALIZED", "REVERTED_BY_REVISOR", "REVERTED_ITEM_NOT_FOUND"
+  reason    String?
+  actedBy   String
+  actedAt   DateTime @default(now())
+
+  @@index([spaceId])
+  @@map("finalization_history")
 }

@@ -25,6 +25,13 @@ export const requireInventoryAccess = () => {
 
       const user = await findUserBySamAccountName(req.user?.sub);
 
+      console.log("[Inventory Middleware] Checking access:", {
+        path: req.path,
+        inventoryId,
+        userId: req.user?.sub,
+        userFound: !!user,
+      });
+
       if (!user) {
         return res.status(401).json({ error: "Usuário não encontrado" });
       }
@@ -124,6 +131,45 @@ export const requireInventoryWriteAccess = () => {
       return res
         .status(403)
         .json({ error: "Perfil VISUALIZADOR não pode alterar dados" });
+    }
+
+    return next();
+  };
+};
+
+export const requireVerificationAccess = () => {
+  return (req, res, next) => {
+    if (!req.inventoryRole) {
+      return res
+        .status(500)
+        .json({ error: "Perfil do inventário não resolvido" });
+    }
+
+    // Only REVISOR (and ADMIN_CICLO) can perform verification operations
+    if (!["REVISOR", "ADMIN_CICLO"].includes(req.inventoryRole)) {
+      return res.status(403).json({
+        error:
+          "Apenas revisores podem executar verificações de salas finalizadas",
+      });
+    }
+
+    return next();
+  };
+};
+
+export const requireNotRevisor = () => {
+  return (req, res, next) => {
+    if (!req.inventoryRole) {
+      return res
+        .status(500)
+        .json({ error: "Perfil do inventário não resolvido" });
+    }
+
+    // Revisor cannot perform certain operations like finalize, relocate items
+    if (req.inventoryRole === "REVISOR") {
+      return res.status(403).json({
+        error: "Revisores não podem executar esta operação",
+      });
     }
 
     return next();

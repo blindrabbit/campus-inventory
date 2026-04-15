@@ -1,8 +1,9 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import axios from "axios";
 import { useToast } from "../../components/Toast/toastContext";
+import { useSSE } from "../../lib/useSSE";
 import Modal from "../../components/Modal/Modal";
 import ModalBody from "../../components/Modal/ModalBody";
 import ModalFooter from "../../components/Modal/ModalFooter";
@@ -101,18 +102,77 @@ export default function DashboardPage() {
   const router = useRouter();
   const { showToast } = useToast();
 
+  // SSE — listen for realtime events across the entire inventory
+  const currentInventoryId =
+    typeof window !== "undefined"
+      ? localStorage.getItem("activeInventoryId")
+      : null;
+  const { lastEvent } = useSSE({
+    inventoryId: currentInventoryId,
+    spaceId: null, // no space filter — see all events for this inventory
+    enabled: !!currentInventoryId,
+  });
+
+  // React to SSE events — show toast and refresh data
+  const loadSpacesRef = useRef(null);
+  useEffect(() => {
+    if (!lastEvent) return;
+    const token = localStorage.getItem("token");
+    if (!token || !currentInventoryId || !loadSpacesRef.current) return;
+
+    const config = {
+      item_relocated: {
+        title: "📦 Item realocado",
+        msg: `${lastEvent.data.user} moveu um item para outra sala.`,
+      },
+      group_relocated: {
+        title: `📦 Grupo realocado`,
+        msg: `${lastEvent.data.user} moveu ${lastEvent.data.count} itens de um grupo.`,
+      },
+      item_checked: {
+        title: "✅ Item conferido",
+        msg: `${lastEvent.data.user} marcou um item como encontrado.`,
+      },
+      batch_checked: {
+        title: "✅ Conferência em massa",
+        msg: `${lastEvent.data.user} conferiu ${lastEvent.data.count} itens.`,
+      },
+      item_restored: {
+        title: "🔄 Item restaurado",
+        msg: `${lastEvent.data.user} restaurou um item.`,
+      },
+    };
+
+    const c = config[lastEvent.type];
+    if (c) {
+      showToast({ type: "info", title: c.title, message: c.msg });
+      // Refresh dashboard data
+      if (loadSpacesRef.current) {
+        loadSpacesRef.current(token, currentInventoryId);
+      }
+    }
+  }, [lastEvent, showToast, currentInventoryId]);
+
   const isInventoryAdmin = useMemo(() => {
     if (user?.role === "ADMIN") return true;
     return activeInventory?.role === "ADMIN_CICLO";
   }, [user, activeInventory]);
 
+  const canManageSpaces = useMemo(() => {
+    return isInventoryAdmin || activeInventory?.role === "REVISOR";
+  }, [isInventoryAdmin, activeInventory?.role]);
+
   const visibleTabs = useMemo(() => {
     if (isInventoryAdmin) return DASHBOARD_TABS;
-    // Usuários não-admin veem apenas a aba de espaços, mas também a aba de criar grupos
-    return DASHBOARD_TABS.filter(
-      (tab) => tab.id === "espacos" || tab.id === "criar-grupos",
-    );
-  }, [isInventoryAdmin]);
+    const inventoryRole = activeInventory?.role;
+    if (inventoryRole === "REVISOR") {
+      return DASHBOARD_TABS.filter(
+        (tab) => tab.id === "espacos" || tab.id === "criar-grupos",
+      );
+    }
+    // CONFERENTE e VISUALIZADOR veem apenas a aba de espaços
+    return DASHBOARD_TABS.filter((tab) => tab.id === "espacos");
+  }, [isInventoryAdmin, activeInventory?.role]);
 
   const filteredGroupedItems = useMemo(() => {
     const term = itemSearch.trim().toLowerCase();
@@ -129,6 +189,22 @@ export default function DashboardPage() {
     }
     return result;
   }, [groupedItems, itemSearch]);
+
+  const getItemOrderPriority = (item) => {
+    if (item?.meta?.isRelocated) return 0;
+    if (item?.statusEncontrado === "SIM") return 2;
+    return 1;
+  };
+
+  const compareItemsByPriority = (a, b) => {
+    const priorityDiff = getItemOrderPriority(a) - getItemOrderPriority(b);
+    if (priorityDiff !== 0) return priorityDiff;
+
+    return (a?.patrimonio || "").localeCompare(b?.patrimonio || "", "pt-BR", {
+      numeric: true,
+      sensitivity: "base",
+    });
+  };
 
   const hasAuditAccess = useMemo(() => {
     return user?.role === "ADMIN" || activeInventory?.role === "ADMIN_CICLO";
@@ -157,10 +233,15 @@ export default function DashboardPage() {
     });
   }, [spaces]);
 
+  const fmtDate = (value) =>
+    value ? new Date(value).toLocaleDateString("pt-BR") : "--/--/--";
+
   const formatSpaceExecutionStatus = (space) => {
     if (space.isFinalized || space.executionStatus === "FINALIZADO") {
+      const date = fmtDate(space.finalizedAt || space.startedAt);
+      const by = space.finalizedBy || space.startedBy || "usuário não identificado";
       return {
-        label: "🟢 Finalizado",
+        label: `🟢 Finalizado em ${date} por ${by}`,
         className: "bg-emerald-100 text-emerald-800",
       };
     }
@@ -250,6 +331,25 @@ export default function DashboardPage() {
 
     const parsedUser = userData ? JSON.parse(userData) : null;
     setUser(parsedUser);
+
+    // Refresh the inventory role from the API — localStorage can be stale
+    // if an admin changed the user's role since the last session.
+    const refreshInventoryRole = async () => {
+      try {
+        const { data } = await axios.get(`${API}/auth/inventory-role`, {
+          params: { inventoryId: normalizedInventory.id },
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (data.inventoryRole) {
+          const updated = { ...normalizedInventory, role: data.inventoryRole };
+          localStorage.setItem("activeInventory", JSON.stringify(updated));
+          setActiveInventory(updated);
+        }
+      } catch {
+        // Non-critical — stale cached role will be used as fallback
+      }
+    };
+    refreshInventoryRole();
 
     const handleStorage = () => {
       syncActiveInventoryFromStorage();
@@ -344,13 +444,9 @@ export default function DashboardPage() {
         grouped[desc].push(item);
       });
 
-      // Ordenar itens dentro de cada grupo por patrimonio
+      // Ordenar itens dentro de cada grupo: movidos no topo e encontrados no final.
       Object.keys(grouped).forEach((desc) => {
-        grouped[desc].sort((a, b) => {
-          const numA = parseInt(a.patrimonio) || 0;
-          const numB = parseInt(b.patrimonio) || 0;
-          return numA - numB;
-        });
+        grouped[desc].sort(compareItemsByPriority);
       });
 
       setAllItems(items);
@@ -377,15 +473,32 @@ export default function DashboardPage() {
         params: { inventoryId },
         headers: { Authorization: `Bearer ${token}` },
       });
-      setItemGroups(Array.isArray(data) ? data : []);
+      const groups = Array.isArray(data) ? data : [];
+      setItemGroups(
+        groups.map((group) => ({
+          ...group,
+          items: Array.isArray(group.items)
+            ? [...group.items].sort(compareItemsByPriority)
+            : [],
+        })),
+      );
     } catch (err) {
       showToast({
         type: "error",
         title: "Falha ao carregar grupos",
-        message: err.response?.data?.error || "Não foi possível carregar os grupos.",
+        message:
+          err.response?.data?.error || "Não foi possível carregar os grupos.",
       });
     } finally {
       setLoadingGroups(false);
+    }
+  };
+
+  loadSpacesRef.current = async (token, inventoryId) => {
+    await loadSpaces(token, inventoryId);
+
+    if (activeTab === "criar-grupos") {
+      await Promise.all([loadAllItems(token), loadItemGroups(token)]);
     }
   };
 
@@ -878,7 +991,7 @@ export default function DashboardPage() {
                   {user?.fullName}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {user?.samAccountName} • {user?.role}
+                  {user?.samAccountName} • {activeInventory?.role || user?.role}
                 </p>
               </div>
               <button
@@ -970,7 +1083,7 @@ export default function DashboardPage() {
             <div className="w-full lg:max-w-2xl">
               <SpaceSearchBar placeholder="Buscar espaços por nome..." />
             </div>
-            {user?.role === "ADMIN" ? (
+            {canManageSpaces ? (
               <div className="lg:flex lg:justify-end">
                 <button
                   type="button"
@@ -1012,7 +1125,7 @@ export default function DashboardPage() {
                   }}
                   className="group relative block cursor-pointer overflow-hidden rounded-xl border border-gray-100 bg-white shadow-md transition-all duration-300 hover:shadow-xl"
                 >
-                  {user?.role === "ADMIN" ? (
+                  {canManageSpaces ? (
                     <button
                       type="button"
                       onClick={(event) => {
@@ -1037,12 +1150,18 @@ export default function DashboardPage() {
                       </span>
                     </div>
 
-                    <div className="mb-4">
+                    <div className="mb-4 flex flex-col gap-1">
                       <span
                         className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${executionStatus.className}`}
                       >
                         {executionStatus.label}
                       </span>
+                      {space.isVerified && space.confirmedBy && (
+                        <span className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold bg-purple-100 text-purple-800">
+                          🟣 Confirmado em {fmtDate(space.confirmedAt)} por{" "}
+                          {space.confirmedBy}
+                        </span>
+                      )}
                     </div>
 
                     <div className="space-y-2 mb-6">
@@ -1108,9 +1227,13 @@ export default function DashboardPage() {
               >
                 Grupos Criados
                 {itemGroups.length > 0 && (
-                  <span className={`rounded-full px-1.5 py-0.5 text-xs font-semibold ${
-                    groupSubTab === "grupos-criados" ? "bg-white/20 text-white" : "bg-slate-300 text-slate-700"
-                  }`}>
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-xs font-semibold ${
+                      groupSubTab === "grupos-criados"
+                        ? "bg-white/20 text-white"
+                        : "bg-slate-300 text-slate-700"
+                    }`}
+                  >
                     {itemGroups.length}
                   </span>
                 )}
@@ -1126,29 +1249,38 @@ export default function DashboardPage() {
                       Criar grupo de itens
                     </p>
                     <p className="mt-1 text-xs text-slate-600">
-                      Selecione os itens que deseja agrupar. Itens serão listados
-                      agrupados pela descrição e patrimônio.
+                      Selecione os itens que deseja agrupar. Itens serão
+                      listados agrupados pela descrição e patrimônio.
                     </p>
                   </div>
                   <button
                     onClick={() => {
                       if (selectedItems.size > 0) {
-                        const selected = allItems.filter((i) => selectedItems.has(i.id));
-                        const descs = [...new Set(selected.map((i) => i.descricao).filter(Boolean))];
+                        const selected = allItems.filter((i) =>
+                          selectedItems.has(i.id),
+                        );
+                        const descs = [
+                          ...new Set(
+                            selected.map((i) => i.descricao).filter(Boolean),
+                          ),
+                        ];
                         if (descs.length === 1) setNewGroupName(descs[0]);
                         setGroupCreationModal(true);
                       } else {
                         showToast({
                           type: "error",
                           title: "Nenhum item selecionado",
-                          message: "Selecione pelo menos um item para criar um grupo.",
+                          message:
+                            "Selecione pelo menos um item para criar um grupo.",
                         });
                       }
                     }}
                     disabled={selectedItems.size === 0 || creatingGroup}
                     className="whitespace-nowrap rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
                   >
-                    {creatingGroup ? "Criando..." : `Criar Grupo (${selectedItems.size})`}
+                    {creatingGroup
+                      ? "Criando..."
+                      : `Criar Grupo (${selectedItems.size})`}
                   </button>
                 </div>
 
@@ -1160,28 +1292,43 @@ export default function DashboardPage() {
                 />
 
                 {loadingItems ? (
-                  <p className="py-8 text-center text-sm text-slate-600">Carregando itens...</p>
+                  <p className="py-8 text-center text-sm text-slate-600">
+                    Carregando itens...
+                  </p>
                 ) : Object.keys(filteredGroupedItems).length === 0 ? (
                   <p className="py-8 text-center text-sm text-slate-600">
-                    {itemSearch.trim() ? "Nenhum item encontrado para a busca." : "Nenhum item disponível no inventário."}
+                    {itemSearch.trim()
+                      ? "Nenhum item encontrado para a busca."
+                      : "Nenhum item disponível no inventário."}
                   </p>
                 ) : (
                   <div className="space-y-3">
                     {(() => {
-                      const allFilteredIds = Object.values(filteredGroupedItems).flat().map((i) => i.id);
-                      const allSelected = allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedItems.has(id));
-                      const someSelected = allFilteredIds.some((id) => selectedItems.has(id));
+                      const allFilteredIds = Object.values(filteredGroupedItems)
+                        .flat()
+                        .map((i) => i.id);
+                      const allSelected =
+                        allFilteredIds.length > 0 &&
+                        allFilteredIds.every((id) => selectedItems.has(id));
+                      const someSelected = allFilteredIds.some((id) =>
+                        selectedItems.has(id),
+                      );
                       return (
                         <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
                           <input
                             type="checkbox"
                             checked={allSelected}
-                            ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                            ref={(el) => {
+                              if (el)
+                                el.indeterminate = someSelected && !allSelected;
+                            }}
                             onChange={() => {
                               setSelectedItems((prev) => {
                                 const next = new Set(prev);
                                 if (allSelected) {
-                                  allFilteredIds.forEach((id) => next.delete(id));
+                                  allFilteredIds.forEach((id) =>
+                                    next.delete(id),
+                                  );
                                 } else {
                                   allFilteredIds.forEach((id) => next.add(id));
                                 }
@@ -1193,85 +1340,116 @@ export default function DashboardPage() {
                         </label>
                       );
                     })()}
-                    {Object.entries(filteredGroupedItems).sort((a, b) => b[1].length - a[1].length).map(([descricao, items]) => {
-                      const firstPatrimonio = parseInt(items[0]?.patrimonio) || 0;
-                      const lastPatrimonio = parseInt(items[items.length - 1]?.patrimonio) || 0;
-                      const isExpanded = expandedGroups[descricao];
-                      const groupIds = items.map((i) => i.id);
-                      const groupAllSelected = groupIds.every((id) => selectedItems.has(id));
-                      const groupSomeSelected = groupIds.some((id) => selectedItems.has(id));
+                    {Object.entries(filteredGroupedItems)
+                      .sort((a, b) => b[1].length - a[1].length)
+                      .map(([descricao, items]) => {
+                        const firstPatrimonio =
+                          parseInt(items[0]?.patrimonio) || 0;
+                        const lastPatrimonio =
+                          parseInt(items[items.length - 1]?.patrimonio) || 0;
+                        const isExpanded = expandedGroups[descricao];
+                        const groupIds = items.map((i) => i.id);
+                        const groupAllSelected = groupIds.every((id) =>
+                          selectedItems.has(id),
+                        );
+                        const groupSomeSelected = groupIds.some((id) =>
+                          selectedItems.has(id),
+                        );
 
-                      return (
-                        <div key={descricao} className="rounded-lg border border-slate-200 bg-slate-50">
-                          <div className="flex items-center px-4 py-3 hover:bg-slate-100">
-                            <input
-                              type="checkbox"
-                              checked={groupAllSelected}
-                              ref={(el) => { if (el) el.indeterminate = groupSomeSelected && !groupAllSelected; }}
-                              onChange={() => {
-                                setSelectedItems((prev) => {
-                                  const next = new Set(prev);
-                                  if (groupAllSelected) {
-                                    groupIds.forEach((id) => next.delete(id));
-                                  } else {
-                                    groupIds.forEach((id) => next.add(id));
-                                  }
-                                  return next;
-                                });
-                              }}
-                              className="mr-3 shrink-0"
-                            />
-                            <button
-                              onClick={() =>
-                                setExpandedGroups((prev) => ({ ...prev, [descricao]: !prev[descricao] }))
-                              }
-                              className="flex flex-1 items-center justify-between gap-2 text-left"
-                            >
-                              <div className="flex-1">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-semibold text-slate-600">
-                                    {isExpanded ? "▼" : "▶"}
-                                  </span>
-                                  <span className="font-semibold text-slate-900">{descricao}</span>
+                        return (
+                          <div
+                            key={descricao}
+                            className="rounded-lg border border-slate-200 bg-slate-50"
+                          >
+                            <div className="flex items-center px-4 py-3 hover:bg-slate-100">
+                              <input
+                                type="checkbox"
+                                checked={groupAllSelected}
+                                ref={(el) => {
+                                  if (el)
+                                    el.indeterminate =
+                                      groupSomeSelected && !groupAllSelected;
+                                }}
+                                onChange={() => {
+                                  setSelectedItems((prev) => {
+                                    const next = new Set(prev);
+                                    if (groupAllSelected) {
+                                      groupIds.forEach((id) => next.delete(id));
+                                    } else {
+                                      groupIds.forEach((id) => next.add(id));
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                className="mr-3 shrink-0"
+                              />
+                              <button
+                                onClick={() =>
+                                  setExpandedGroups((prev) => ({
+                                    ...prev,
+                                    [descricao]: !prev[descricao],
+                                  }))
+                                }
+                                className="flex flex-1 items-center justify-between gap-2 text-left"
+                              >
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-semibold text-slate-600">
+                                      {isExpanded ? "▼" : "▶"}
+                                    </span>
+                                    <span className="font-semibold text-slate-900">
+                                      {descricao}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 text-xs text-slate-600">
+                                    Patrimônio #{firstPatrimonio} a #
+                                    {lastPatrimonio} • {items.length} unidade(s)
+                                  </p>
                                 </div>
-                                <p className="mt-1 text-xs text-slate-600">
-                                  Patrimônio #{firstPatrimonio} a #{lastPatrimonio} • {items.length} unidade(s)
-                                </p>
-                              </div>
-                              <span className="inline-flex items-center gap-2 rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700">
-                                {groupIds.filter((id) => selectedItems.has(id)).length}/{items.length}
-                              </span>
-                            </button>
-                          </div>
-
-                          {isExpanded && (
-                            <div className="border-t border-slate-200 bg-white">
-                              <div className="max-h-72 space-y-1 overflow-y-auto p-3">
-                                {items.map((item) => (
-                                  <label
-                                    key={item.id}
-                                    className="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 hover:bg-slate-50"
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={selectedItems.has(item.id)}
-                                      onChange={() => handleToggleItemSelection(item.id)}
-                                      className="mt-1"
-                                    />
-                                    <div className="flex-1 text-sm">
-                                      <p className="font-medium text-slate-900">#{item.patrimonio}</p>
-                                      <p className="text-xs text-slate-600">
-                                        {item.space?.name} • {item.condicaoVisual}
-                                      </p>
-                                    </div>
-                                  </label>
-                                ))}
-                              </div>
+                                <span className="inline-flex items-center gap-2 rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700">
+                                  {
+                                    groupIds.filter((id) =>
+                                      selectedItems.has(id),
+                                    ).length
+                                  }
+                                  /{items.length}
+                                </span>
+                              </button>
                             </div>
-                          )}
-                        </div>
-                      );
-                    })}
+
+                            {isExpanded && (
+                              <div className="border-t border-slate-200 bg-white">
+                                <div className="max-h-72 space-y-1 overflow-y-auto p-3">
+                                  {items.map((item) => (
+                                    <label
+                                      key={item.id}
+                                      className="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 hover:bg-slate-50"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedItems.has(item.id)}
+                                        onChange={() =>
+                                          handleToggleItemSelection(item.id)
+                                        }
+                                        className="mt-1"
+                                      />
+                                      <div className="flex-1 text-sm">
+                                        <p className="font-medium text-slate-900">
+                                          #{item.patrimonio}
+                                        </p>
+                                        <p className="text-xs text-slate-600">
+                                          {item.space?.name} •{" "}
+                                          {item.condicaoVisual}
+                                        </p>
+                                      </div>
+                                    </label>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                   </div>
                 )}
               </div>
@@ -1281,39 +1459,58 @@ export default function DashboardPage() {
             {groupSubTab === "grupos-criados" && (
               <div className="rounded-xl border border-slate-200 p-4">
                 {loadingGroups ? (
-                  <p className="py-8 text-center text-sm text-slate-500">Carregando grupos...</p>
+                  <p className="py-8 text-center text-sm text-slate-500">
+                    Carregando grupos...
+                  </p>
                 ) : itemGroups.length === 0 ? (
-                  <p className="py-8 text-center text-sm text-slate-500">Nenhum grupo criado ainda.</p>
+                  <p className="py-8 text-center text-sm text-slate-500">
+                    Nenhum grupo criado ainda.
+                  </p>
                 ) : (
                   <div className="space-y-2">
                     {itemGroups.map((group) => {
                       const isOpen = expandedCreatedGroups[group.id];
-                      const found = group.items.filter((i) => i.statusEncontrado === "SIM").length;
+                      const found = group.items.filter(
+                        (i) => i.statusEncontrado === "SIM",
+                      ).length;
                       return (
-                        <div key={group.id} className="rounded-lg border border-slate-200 bg-slate-50">
+                        <div
+                          key={group.id}
+                          className="rounded-lg border border-slate-200 bg-slate-50"
+                        >
                           <button
                             onClick={() =>
-                              setExpandedCreatedGroups((prev) => ({ ...prev, [group.id]: !prev[group.id] }))
+                              setExpandedCreatedGroups((prev) => ({
+                                ...prev,
+                                [group.id]: !prev[group.id],
+                              }))
                             }
                             className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-slate-100"
                           >
                             <div className="flex-1">
-                              <p className="font-semibold text-slate-900">{group.name}</p>
+                              <p className="font-semibold text-slate-900">
+                                {group.name}
+                              </p>
                               {group.description && (
-                                <p className="text-xs text-slate-500">{group.description}</p>
+                                <p className="text-xs text-slate-500">
+                                  {group.description}
+                                </p>
                               )}
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="text-xs text-slate-500">
                                 {found}/{group.items.length} encontrado(s)
                               </span>
-                              <span className={`h-2 w-2 rounded-full ${
-                                found === group.items.length && group.items.length > 0
-                                  ? "bg-emerald-500"
-                                  : found > 0
-                                  ? "bg-amber-400"
-                                  : "bg-rose-400"
-                              }`} />
+                              <span
+                                className={`h-2 w-2 rounded-full ${
+                                  found === group.items.length &&
+                                  group.items.length > 0
+                                    ? "bg-emerald-500"
+                                    : found > 0
+                                      ? "bg-amber-400"
+                                      : "bg-rose-400"
+                                }`}
+                              />
                               <span className="text-xs font-semibold text-slate-500">
                                 {isOpen ? "▲" : "▼"}
                               </span>
@@ -1323,7 +1520,9 @@ export default function DashboardPage() {
                           {isOpen && (
                             <div className="border-t border-slate-200 bg-white">
                               {group.items.length === 0 ? (
-                                <p className="px-4 py-3 text-xs text-slate-500">Sem itens.</p>
+                                <p className="px-4 py-3 text-xs text-slate-500">
+                                  Sem itens.
+                                </p>
                               ) : (
                                 <div className="divide-y divide-slate-100">
                                   {group.items.map((item) => (
@@ -1335,24 +1534,29 @@ export default function DashboardPage() {
                                         <p className="text-sm font-medium text-slate-900">
                                           #{item.patrimonio}
                                         </p>
-                                        <p className="truncate text-xs text-slate-500">{item.descricao}</p>
+                                        <p className="truncate text-xs text-slate-500">
+                                          {item.descricao}
+                                        </p>
                                       </div>
                                       <div className="flex shrink-0 flex-col items-end gap-1">
                                         <span className="text-xs text-slate-600">
-                                          {item.space?.name || "Sem localização"}
+                                          {item.space?.name ||
+                                            "Sem localização"}
                                         </span>
-                                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                                          item.statusEncontrado === "SIM"
-                                            ? "bg-emerald-100 text-emerald-700"
-                                            : item.statusEncontrado === "NAO"
-                                            ? "bg-rose-100 text-rose-700"
-                                            : "bg-amber-100 text-amber-700"
-                                        }`}>
+                                        <span
+                                          className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                                            item.statusEncontrado === "SIM"
+                                              ? "bg-emerald-100 text-emerald-700"
+                                              : item.statusEncontrado === "NAO"
+                                                ? "bg-rose-100 text-rose-700"
+                                                : "bg-amber-100 text-amber-700"
+                                          }`}
+                                        >
                                           {item.statusEncontrado === "SIM"
                                             ? "Encontrado"
                                             : item.statusEncontrado === "NAO"
-                                            ? "Não localizado"
-                                            : "Pendente"}
+                                              ? "Não localizado"
+                                              : "Pendente"}
                                         </span>
                                       </div>
                                     </div>

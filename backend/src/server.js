@@ -10,6 +10,7 @@ import auditRoutes from "./routes/audit.routes.js";
 import exportRoutes from "./routes/export.routes.js";
 import inventoryRoutes from "./routes/inventory.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
+import eventsRoutes from "./routes/events.routes.js";
 
 const app = express();
 const isProduction = process.env.NODE_ENV === "production";
@@ -65,6 +66,7 @@ app.use("/api/audit", auditRoutes);
 app.use("/api/export", exportRoutes);
 app.use("/api/inventories", inventoryRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/events", eventsRoutes);
 
 // Health check
 app.get("/api/health", (req, res) =>

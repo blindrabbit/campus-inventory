@@ -1,6 +1,7 @@
 import "./globals.css";
 import "../components/Modal/modal.css";
 import ToastProviders from "../components/Toast/ToastProviders";
+import AxiosAuthGuard from "../components/AxiosAuthGuard";
 
 export const metadata = {
   title: {
@@ -20,6 +21,7 @@ export default function RootLayout({ children }) {
     <html lang="en">
       <body>
         <ToastProviders>
+          <AxiosAuthGuard />
           <main className="app-shell">{children}</main>
           <footer
             className="global-footer"

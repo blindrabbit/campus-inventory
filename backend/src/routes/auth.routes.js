@@ -105,4 +105,58 @@ router.post("/login", loginLimiter, async (req, res) => {
   }
 });
 
+/**
+ * GET /auth/inventory-role
+ * Returns the current user's role for a specific inventory
+ */
+router.get("/inventory-role", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) {
+      return res.status(401).json({ error: "Token não fornecido" });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "dev-secret");
+    const inventoryId = req.query.inventoryId?.toString();
+
+    if (!inventoryId) {
+      return res.status(400).json({ error: "inventoryId é obrigatório" });
+    }
+
+    // Resolve the DB user first (decoded.sub is samAccountName, not the DB id)
+    const user = await prisma.user.findUnique({
+      where: { samAccountName: decoded.sub },
+      select: { id: true, role: true },
+    });
+
+    // Global admins always get ADMIN_CICLO
+    if (user?.role === "ADMIN") {
+      return res.json({ inventoryRole: "ADMIN_CICLO", inventoryId });
+    }
+
+    // Look up inventory-specific role using the real DB id
+    let role = null;
+    if (user) {
+      const inventoryUser = await prisma.inventoryUser.findUnique({
+        where: {
+          inventoryId_userId: {
+            inventoryId,
+            userId: user.id,
+          },
+        },
+        select: { role: true },
+      });
+      role = inventoryUser?.role || null;
+    }
+
+    res.json({
+      inventoryRole: role || "CONFERENTE",
+      inventoryId,
+    });
+  } catch (err) {
+    console.error("Error getting inventory role:", err);
+    res.status(500).json({ error: "Erro ao obter perfil do inventário" });
+  }
+});
+
 export default router;

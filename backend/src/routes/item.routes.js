@@ -4,9 +4,11 @@ import {
   requireInventoryAccess,
   requireInventoryOperationalWrite,
   requireInventoryWriteAccess,
+  requireVerificationAccess,
 } from "../middleware/inventory.js";
 import { prisma } from "../prisma/client.js";
 import { recordItemHistory } from "../services/audit.js";
+import { broadcast } from "../services/sse.js";
 
 const router = Router();
 
@@ -86,6 +88,9 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
       condicaoVisual: item.condicaoVisual,
       dataConferencia: item.dataConferencia,
       ultimoConferente: item.ultimoConferente,
+      verificationStatus: item.verificationStatus,
+      verifiedAt: item.verifiedAt,
+      verifiedBy: item.verifiedBy,
       itemGroupId: item.itemGroup?.id || null,
       groupName: item.itemGroup?.name || null,
       meta: item.relocationIn
@@ -198,7 +203,7 @@ router.post(
   requireInventoryOperationalWrite(),
   async (req, res) => {
     try {
-      const { itemId, condicao } = req.body;
+      const { itemId, condicao, connectionId } = req.body;
       const user = req.user;
 
       console.log(
@@ -281,6 +286,27 @@ router.post(
       });
 
       console.log(`[CHECK] Transaction completed successfully`);
+
+      // Build excludeClientId from inventoryId + userId + connectionId to exclude only this session
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      // Notify other users watching this space
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: item.spaceId,
+        action: "item_checked",
+        excludeClientId,
+        payload: {
+          itemId,
+          spaceId: item.spaceId,
+          action: "ENCONTRADO",
+          user: user.fullName || user.sub,
+          timestamp: new Date(),
+        },
+      });
+
       res.json({ success: true, savedAt: new Date() });
     } catch (err) {
       console.error("[CHECK] ERROR:", err.message || err);
@@ -300,7 +326,7 @@ router.post(
   requireInventoryOperationalWrite(),
   async (req, res) => {
     try {
-      const { itemId, targetSpaceId, groupMoveCount } = req.body;
+      const { itemId, targetSpaceId, groupMoveCount, connectionId } = req.body;
       const user = req.user;
 
       const item = await prisma.item.findUnique({
@@ -374,9 +400,10 @@ router.post(
           toSpaceId: targetSpaceId,
           action: "REALOCADO",
           createdBy: user.sub,
-          metadata: groupMoveCount != null
-            ? JSON.stringify({ groupMoveCount: Number(groupMoveCount) })
-            : null,
+          metadata:
+            groupMoveCount != null
+              ? JSON.stringify({ groupMoveCount: Number(groupMoveCount) })
+              : null,
         });
       });
 
@@ -384,6 +411,31 @@ router.post(
         inventoryId: req.inventoryId,
         spaceId: item.spaceId,
         user,
+      });
+
+      console.log(
+        `[RELOCATE] Item ${itemId} moved from space ${item.spaceId} to ${targetSpaceId}`,
+      );
+
+      // Build excludeClientId from inventoryId + userId + connectionId to exclude only this session
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      // Notify users in the DESTINATION space that an item was moved there
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: targetSpaceId,
+        action: "item_relocated",
+        excludeClientId,
+        payload: {
+          itemId,
+          fromSpaceId: item.spaceId,
+          toSpaceId: targetSpaceId,
+          action: "REALOCADO",
+          user: user.fullName || user.sub,
+          timestamp: movedAt,
+        },
       });
 
       res.json({
@@ -405,18 +457,22 @@ router.post(
   requireInventoryOperationalWrite(),
   async (req, res) => {
     try {
-      const { itemGroupId, sourceSpaceId, targetSpaceId, count } = req.body;
+      const { itemGroupId, sourceSpaceId, targetSpaceId, count, connectionId } =
+        req.body;
       const user = req.user;
 
       if (!itemGroupId || !sourceSpaceId || !targetSpaceId || !count) {
         return res.status(400).json({
-          error: "itemGroupId, sourceSpaceId, targetSpaceId e count são obrigatórios",
+          error:
+            "itemGroupId, sourceSpaceId, targetSpaceId e count são obrigatórios",
         });
       }
 
       const qty = Number(count);
       if (!Number.isInteger(qty) || qty < 1) {
-        return res.status(400).json({ error: "count deve ser um inteiro positivo" });
+        return res
+          .status(400)
+          .json({ error: "count deve ser um inteiro positivo" });
       }
 
       const [targetSpace, items] = await Promise.all([
@@ -425,7 +481,11 @@ router.post(
           select: { id: true },
         }),
         prisma.item.findMany({
-          where: { inventoryId: req.inventoryId, itemGroupId, spaceId: sourceSpaceId },
+          where: {
+            inventoryId: req.inventoryId,
+            itemGroupId,
+            spaceId: sourceSpaceId,
+          },
           select: { id: true },
           take: qty,
         }),
@@ -485,6 +545,28 @@ router.post(
         inventoryId: req.inventoryId,
         spaceId: sourceSpaceId,
         user,
+      });
+
+      // Build excludeClientId from inventoryId + userId + connectionId to exclude only this session
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      // Notify users in the DESTINATION space
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: targetSpaceId,
+        action: "group_relocated",
+        excludeClientId,
+        payload: {
+          itemIds: itemIds,
+          fromSpaceId: sourceSpaceId,
+          toSpaceId: targetSpaceId,
+          action: "REALOCADO",
+          user: user.fullName || user.sub,
+          count: items.length,
+          timestamp: movedAt,
+        },
       });
 
       res.json({
@@ -617,6 +699,7 @@ router.post(
   async (req, res) => {
     try {
       const { itemId } = req.params;
+      const { connectionId } = req.body;
       const user = req.user;
 
       const item = await prisma.item.findUnique({
@@ -650,6 +733,26 @@ router.post(
         createdBy: user.sub,
       });
 
+      // Build excludeClientId from inventoryId + userId + connectionId to exclude only this session
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      // Notify users in the restored space
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: item.lastKnownSpaceId || item.spaceId,
+        action: "item_restored",
+        excludeClientId,
+        payload: {
+          itemId,
+          spaceId: item.lastKnownSpaceId || item.spaceId,
+          action: "ESTORNADO",
+          user: user.fullName || user.sub,
+          timestamp: new Date(),
+        },
+      });
+
       res.json({ success: true });
     } catch (err) {
       console.error("Error restoring item:", err);
@@ -672,6 +775,7 @@ router.post(
         patrimonioFinal,
         condicaoVisual,
         dryRun,
+        connectionId,
       } = req.body;
       const user = req.user;
 
@@ -810,6 +914,26 @@ router.post(
         }),
       ]);
 
+      // Build excludeClientId from inventoryId + userId + connectionId to exclude only this session
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      // Notify other users watching this space
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId,
+        action: "batch_checked",
+        excludeClientId,
+        payload: {
+          spaceId,
+          action: "ENCONTRADO",
+          user: user.fullName || user.sub,
+          count: matchedItems.length,
+          timestamp: new Date(),
+        },
+      });
+
       res.json({
         success: true,
         updatedCount: matchedItems.length,
@@ -819,6 +943,186 @@ router.post(
     } catch (err) {
       console.error("Error checking items in batch:", err);
       res.status(500).json({ error: "Erro ao marcar itens em massa" });
+    }
+  },
+);
+
+// ========================================
+// REVISOR VERIFICATION ENDPOINT
+// ========================================
+
+/**
+ * POST /api/items/:id/verify-check
+ * Revisor re-checks items during finalized space verification
+ * Only works on items with verificationStatus = "REVERIFICAR"
+ */
+router.post(
+  "/:id/verify-check",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireVerificationAccess(),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { condicao, spaceId } = req.body;
+      const user = req.user;
+
+      if (!spaceId || !["SIM", "NAO"].includes(condicao)) {
+        return res.status(400).json({
+          error: "spaceId e condicao (SIM/NAO) são obrigatórios",
+        });
+      }
+
+      // Get item
+      const item = await prisma.item.findUnique({
+        where: { id },
+        include: { space: true },
+      });
+
+      if (!item) {
+        return res.status(404).json({ error: "Item não encontrado" });
+      }
+
+      if (item.inventoryId !== req.inventoryId) {
+        return res.status(403).json({ error: "Acesso negado" });
+      }
+
+      if (item.spaceId !== spaceId) {
+        return res.status(400).json({ error: "Item não está neste espaço" });
+      }
+
+      if (item.verificationStatus !== "REVERIFICAR") {
+        return res.status(400).json({
+          error: "Item já foi verificado ou não está marcado para reverificação",
+        });
+      }
+
+      const timestamp = new Date();
+
+      // Helper: check if all items in the roll are resolved (no REVERIFICAR left)
+      async function checkAllResolved() {
+        const roll = await prisma.verificationRoll.findFirst({
+          where: { spaceId, result: "PENDING" },
+        });
+        if (!roll) return false;
+        const selectedIds = JSON.parse(roll.itemIds);
+        const unresolvedCount = await prisma.item.count({
+          where: { id: { in: selectedIds }, verificationStatus: "REVERIFICAR" },
+        });
+        return unresolvedCount === 0;
+      }
+
+      // If "NAO" (not found during verification) — item stays in room, marked red
+      if (condicao === "NAO") {
+        await prisma.item.update({
+          where: { id },
+          data: {
+            verificationStatus: "NAO_LOCALIZADO_VERIFICACAO",
+            verifiedAt: timestamp,
+            verifiedBy: user.sub,
+          },
+        });
+
+        await recordItemHistory(prisma, {
+          itemId: id,
+          fromSpaceId: spaceId,
+          toSpaceId: spaceId,
+          action: "NAOENLOCALIZADO_VERIFICACAO",
+          createdBy: user.sub,
+          metadata: null,
+        });
+
+        const allResolved = await checkAllResolved();
+
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId,
+          action: "verification_item_not_found",
+          payload: {
+            itemId: id,
+            patrimonio: item.patrimonio,
+            spaceId,
+            user: user.fullName || user.sub,
+            allResolved,
+          },
+        });
+
+        return res.json({
+          success: true,
+          message:
+            "Item marcado como não localizado. Ficará em vermelho para o conferente.",
+          autoRevert: false,
+          allResolved,
+          item: {
+            id,
+            verificationStatus: "NAO_LOCALIZADO_VERIFICACAO",
+            verifiedAt: timestamp,
+            verifiedBy: user.sub,
+          },
+        });
+      }
+
+      // If "SIM" (found), mark as verified
+      await prisma.item.update({
+        where: { id },
+        data: {
+          statusEncontrado: "SIM",
+          condicaoVisual: condicao,
+          dataConferencia: timestamp,
+          ultimoConferente: user.sub,
+          verificationStatus: null, // Clear verification mark
+          verifiedAt: timestamp,
+          verifiedBy: user.sub,
+        },
+      });
+
+      // Clear pending relocation confirmation
+      await prisma.relocation.updateMany({
+        where: { itemId: id, pendingConfirm: true },
+        data: { pendingConfirm: false },
+      });
+
+      // Record history
+      await recordItemHistory(prisma, {
+        itemId: id,
+        fromSpaceId: spaceId,
+        toSpaceId: spaceId,
+        action: "VERIFICADO",
+        createdBy: user.sub,
+        metadata: null,
+      });
+
+      const allResolved = await checkAllResolved();
+
+      // Notify other users
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId,
+        action: "item_verified",
+        payload: {
+          itemId: id,
+          patrimonio: item.patrimonio,
+          spaceId,
+          user: user.fullName || user.sub,
+          allResolved,
+        },
+      });
+
+      res.json({
+        success: true,
+        message: "Item verificado com sucesso",
+        allResolved,
+        item: {
+          id,
+          statusEncontrado: "SIM",
+          verificationStatus: null,
+          verifiedAt: timestamp,
+          verifiedBy: user.sub,
+        },
+      });
+    } catch (err) {
+      console.error("Error verifying item:", err);
+      res.status(500).json({ error: "Erro ao verificar item" });
     }
   },
 );

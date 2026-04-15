@@ -1,8 +1,9 @@
 "use client";
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import axios from "axios";
 import { enqueueAction, useAutoSave } from "../../../lib/syncQueue";
+import { useSSE } from "../../../lib/useSSE";
 import Modal from "../../../components/Modal/Modal";
 import ModalBody from "../../../components/Modal/ModalBody";
 import ModalFooter from "../../../components/Modal/ModalFooter";
@@ -84,6 +85,67 @@ export default function RoomPage() {
   const [showRelocatedItems, setShowRelocatedItems] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState({});
 
+  // Verification workflow for reviewers
+  const [verificationStatus, setVerificationStatus] = useState(null);
+  const [verificationItems, setVerificationItems] = useState([]);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isRevertModalOpen, setIsRevertModalOpen] = useState(false);
+  const verificationInitiatedRef = useRef(false);
+  const [inventoryRole, setInventoryRole] = useState(null);
+
+  // SSE — listen for realtime events from other users in this space
+  const currentInventoryId =
+    typeof window !== "undefined"
+      ? localStorage.getItem("activeInventoryId")
+      : null;
+  const sseHook = useSSE({
+    inventoryId: currentInventoryId,
+    spaceId,
+    enabled: !!currentInventoryId && !!spaceId,
+  });
+  const { lastEvent, connectionId } = sseHook;
+
+  // React to SSE events — show toast and refresh data
+  const loadDataRef = useMemo(() => ({ current: null }), []);
+  useEffect(() => {
+    if (!lastEvent) return;
+    const token = localStorage.getItem("token");
+    if (!token || !loadDataRef.current) {
+      return;
+    }
+
+    const config = {
+      item_relocated: {
+        title: "📦 Item movido para esta sala",
+        msg: `Um item foi movido para cá por ${lastEvent.data.user}.`,
+      },
+      group_relocated: {
+        title: `📦 ${lastEvent.data.count} ite${lastEvent.data.count > 1 ? "ns" : "m"} movido${lastEvent.data.count > 1 ? "s" : ""} para esta sala`,
+        msg: `Grupo movido por ${lastEvent.data.user}.`,
+      },
+      item_checked: {
+        title: "✅ Item conferido",
+        msg: `${lastEvent.data.user} marcou um item como encontrado nesta sala.`,
+      },
+      batch_checked: {
+        title: "✅ Conferência em massa",
+        msg: `${lastEvent.data.user} conferiu ${lastEvent.data.count} itens nesta sala.`,
+      },
+      item_restored: {
+        title: "🔄 Item restaurado",
+        msg: `${lastEvent.data.user} restaurou um item para esta sala.`,
+      },
+    };
+
+    const c = config[lastEvent.type];
+    if (c) {
+      showToast({ type: "info", title: c.title, message: c.msg });
+      if (loadDataRef.current) {
+        loadDataRef.current(token, currentInventoryId);
+      }
+    }
+  }, [lastEvent, showToast, currentInventoryId]);
+
   useEffect(() => {
     const token = localStorage.getItem("token");
     const userData = localStorage.getItem("user");
@@ -148,11 +210,28 @@ export default function RoomPage() {
   };
 
   const getSpaceStartBadge = (spaceData) => {
+    // Verificar primeiro se está finalizado
+    if (spaceData?.isFinalized) {
+      const date = spaceData?.finalizedAt || spaceData?.startedAt;
+      const finalizedLabel = date
+        ? new Date(date).toLocaleDateString("pt-BR")
+        : "--/--/--";
+      const finalizedBy =
+        spaceData?.finalizedBy ||
+        spaceData?.startedByDisplay ||
+        spaceData?.startedBy ||
+        "usuário não identificado";
+
+      return {
+        label: `🟢 Finalizado em ${finalizedLabel} por ${finalizedBy}`,
+        className: "bg-emerald-100 text-emerald-800",
+      };
+    }
+
     const wasStarted =
       Boolean(spaceData?.startedAt) ||
       spaceData?.executionStatus === "INICIADO" ||
-      spaceData?.executionStatus === "FINALIZADO" ||
-      spaceData?.isFinalized;
+      spaceData?.executionStatus === "FINALIZADO";
 
     if (wasStarted) {
       const startedLabel = spaceData?.startedAt
@@ -164,16 +243,16 @@ export default function RoomPage() {
         "usuário não identificado";
 
       return {
-        label: `Iniciado em ${startedLabel} por ${startedBy}`,
+        label: `🟠 Iniciado em ${startedLabel} por ${startedBy}`,
         className: "bg-amber-100 text-amber-800",
       };
     }
 
     return {
-      label: "Não iniciado",
+      label: "🔴 Não iniciado",
       className: "bg-rose-100 text-rose-700",
     };
-  };
+  };;
 
   const getDirectionBadgeClass = (direction) => {
     if (direction === "ENTRADA") return "bg-emerald-100 text-emerald-700";
@@ -290,15 +369,59 @@ export default function RoomPage() {
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
+      // Verification-related items should ALWAYS be shown regardless of filters
+      if (
+        item.verificationStatus === "REVERIFICAR" ||
+        item.verificationStatus === "NAO_LOCALIZADO_VERIFICACAO" ||
+        verificationItems?.includes(item.id)
+      ) {
+        return true;
+      }
+
       if (!showFoundItems && item.statusEncontrado === "SIM") return false;
       if (!showRelocatedItems && item.meta?.isRelocated) return false;
       return true;
     });
-  }, [items, showFoundItems, showRelocatedItems]);
+  }, [items, showFoundItems, showRelocatedItems, verificationItems]);
 
   // Separa itens em grupos visuais (pilha) e itens avulsos
-  // Itens/grupos movidos aparecem primeiro
+  // Escalonamento:
+  // 1) Itens movidos para a sala (topo)
+  // 2) Itens pendentes/não encontrados
+  // 3) Itens encontrados (final)
   const displayRows = useMemo(() => {
+    const getItemOrderPriority = (item) => {
+      // Verification items take highest priority (for reviewers)
+      if (item?.verificationStatus === "REVERIFICAR") return -1;
+      if (item?.meta?.isRelocated) return 0;
+      if (item?.statusEncontrado === "SIM") return 2;
+      return 1;
+    };
+
+    const compareItems = (a, b) => {
+      const priorityDiff = getItemOrderPriority(a) - getItemOrderPriority(b);
+      if (priorityDiff !== 0) return priorityDiff;
+
+      return (a.patrimonio || "").localeCompare(b.patrimonio || "", "pt-BR", {
+        numeric: true,
+        sensitivity: "base",
+      });
+    };
+
+    const getRowOrderPriority = (row) => {
+      if (row.type === "single") {
+        return getItemOrderPriority(row.item);
+      }
+
+      // Para grupos, usa a maior prioridade presente no grupo
+      // (se houver item verificação, grupo sobe; se houver item movido, grupo sobe; se todos encontrados, grupo desce).
+      return row.items.reduce(
+        (minPriority, item) =>
+          Math.min(minPriority, getItemOrderPriority(item)),
+        2,
+      );
+    };
+
     const groupMap = {};
     const rows = [];
     for (const item of filteredItems) {
@@ -317,26 +440,32 @@ export default function RoomPage() {
         rows.push({ type: "single", item });
       }
     }
-    // Sort: relocated rows first
-    rows.sort((a, b) => {
-      const aRelocated =
-        a.type === "single"
-          ? a.item.meta?.isRelocated
-            ? 1
-            : 0
-          : a.items.some((i) => i.meta?.isRelocated)
-            ? 1
-            : 0;
-      const bRelocated =
-        b.type === "single"
-          ? b.item.meta?.isRelocated
-            ? 1
-            : 0
-          : b.items.some((i) => i.meta?.isRelocated)
-            ? 1
-            : 0;
-      return bRelocated - aRelocated;
+
+    // Ordena itens dentro de cada grupo com a mesma regra geral.
+    Object.values(groupMap).forEach((groupRow) => {
+      groupRow.items.sort(compareItems);
     });
+
+    // Ordenação final das linhas.
+    rows.sort((a, b) => {
+      const priorityDiff = getRowOrderPriority(a) - getRowOrderPriority(b);
+      if (priorityDiff !== 0) return priorityDiff;
+
+      const aName =
+        a.type === "single"
+          ? a.item.patrimonio || a.item.descricao || ""
+          : a.groupName || "";
+      const bName =
+        b.type === "single"
+          ? b.item.patrimonio || b.item.descricao || ""
+          : b.groupName || "";
+
+      return aName.localeCompare(bName, "pt-BR", {
+        numeric: true,
+        sensitivity: "base",
+      });
+    });
+
     return rows;
   }, [filteredItems]);
 
@@ -352,7 +481,7 @@ export default function RoomPage() {
 
   const loadData = async (token, inventoryId) => {
     try {
-      const [spacesRes, itemsRes] = await Promise.all([
+      const [spacesRes, itemsRes, roleRes] = await Promise.all([
         axios.get(`${API}/spaces/active`, {
           params: { includeFinalized: "true", inventoryId },
           headers: { Authorization: `Bearer ${token}` },
@@ -361,16 +490,247 @@ export default function RoomPage() {
           params: { inventoryId },
           headers: { Authorization: `Bearer ${token}` },
         }),
+        axios
+          .get(`${API}/auth/inventory-role`, {
+            params: { inventoryId },
+            headers: { Authorization: `Bearer ${token}` },
+          })
+          .catch(() => ({ data: { inventoryRole: null } })),
       ]);
       setSpaces(spacesRes.data);
       setItems(itemsRes.data);
       setSpace(spacesRes.data.find((s) => s.id === spaceId));
+      setInventoryRole(roleRes.data.inventoryRole || null);
     } catch (err) {
-      console.error(err);
+      console.error("[Room Page] Error loading data:", err);
     } finally {
       setLoading(false);
     }
   };
+  // Expose loadData to SSE handler via ref
+  loadDataRef.current = loadData;
+
+  // Verification workflow for reviewers
+  const initiateVerification = async () => {
+    if (
+      !space?.isFinalized ||
+      !["REVISOR", "ADMIN_CICLO"].includes(inventoryRole)
+    )
+      return;
+
+    try {
+      setIsVerifying(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+
+      const { data } = await axios.post(
+        `${API}/spaces/${spaceId}/initiate-verification`,
+        { inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+
+      setVerificationStatus({
+        verificationRoll: data.verificationRoll,
+        totalToReview: data.totalToReview,
+        totalItems: data.totalItems,
+      });
+
+      const selectedIds = data.selectedItemIds || [];
+      setVerificationItems(selectedIds);
+
+      // Reload data to get items with verificationStatus field populated
+      await loadData(token, inventoryId);
+
+      showToast({
+        type: "info",
+        title: "Verificação Iniciada",
+        message: `${data.totalToReview} itens selecionados para reverificação (10% da sala)`,
+      });
+    } catch (err) {
+      if (err.response?.data?.error?.includes("já em andamento")) {
+        // Verification already exists, just load it
+        loadVerificationStatus();
+        const token = localStorage.getItem("token");
+        const inventoryId = localStorage.getItem("activeInventoryId");
+        await loadData(token, inventoryId);
+      } else {
+        showToast({
+          type: "error",
+          title: "Erro ao iniciar verificação",
+          message: err.response?.data?.error || "Erro ao iniciar verificação",
+        });
+      }
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const loadVerificationStatus = async () => {
+    if (
+      !space?.isFinalized ||
+      !["REVISOR", "ADMIN_CICLO"].includes(inventoryRole)
+    )
+      return;
+
+    try {
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const { data } = await axios.get(
+        `${API}/spaces/${spaceId}/verification-status`,
+        {
+          params: { inventoryId },
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+
+      if (data.hasActiveVerification) {
+        setVerificationStatus({
+          verificationRoll: data.verificationRoll,
+          verified: data.verified,
+          remaining: data.remaining,
+        });
+        setVerificationItems(data.items.map((i) => i.id));
+      }
+    } catch (err) {
+      console.error("Error loading verification status:", err);
+    }
+  };
+
+  const handleRevertFinalization = async () => {
+    try {
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+
+      await axios.post(
+        `${API}/spaces/${spaceId}/revert-finalization`,
+        { reason: "revisor_requested", inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+
+      showToast({
+        type: "success",
+        title: "Sala Revertida",
+        message: "Sala retornada para inspeção dos conferentes",
+      });
+
+      setIsRevertModalOpen(false);
+      setTimeout(() => router.push("/dashboard"), 1500);
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Erro ao reverter sala",
+        message: err.response?.data?.error || "Erro ao reverter sala",
+      });
+    }
+  };
+
+  const handleVerifyCheck = async (itemId, condicao) => {
+    try {
+      setSaving(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+
+      const { data } = await axios.post(
+        `${API}/items/${itemId}/verify-check`,
+        { condicao, spaceId, inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+
+      if (condicao === "SIM") {
+        // Item verified — turn green, clear verification mark
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === itemId
+              ? {
+                  ...i,
+                  verificationStatus: null,
+                  statusEncontrado: "SIM",
+                  verifiedAt: data.item?.verifiedAt,
+                  verifiedBy: data.item?.verifiedBy,
+                }
+              : i,
+          ),
+        );
+        showToast({
+          type: "success",
+          title: "Item Verificado",
+          message: "Item re-verificado com sucesso.",
+        });
+      } else {
+        // Item not found during verification — stays in room, marked red
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === itemId
+              ? {
+                  ...i,
+                  verificationStatus: "NAO_LOCALIZADO_VERIFICACAO",
+                  verifiedAt: data.item?.verifiedAt,
+                  verifiedBy: data.item?.verifiedBy,
+                }
+              : i,
+          ),
+        );
+        showToast({
+          type: "warning",
+          title: "Item Não Localizado",
+          message:
+            "Item ficará destacado em vermelho para o conferente re-verificar.",
+        });
+      }
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Erro ao verificar item",
+        message: err.response?.data?.error || "Erro ao verificar item",
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCompleteVerification = async () => {
+    try {
+      setSaving(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+
+      await axios.post(
+        `${API}/spaces/${spaceId}/complete-verification`,
+        { inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+
+      showToast({
+        type: "success",
+        title: "Verificação Concluída",
+        message: "Sala finalizada com sucesso após verificação.",
+      });
+
+      setTimeout(() => router.push("/dashboard"), 1500);
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Erro ao finalizar verificação",
+        message: err.response?.data?.error || "Erro ao concluir verificação",
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Initiate verification when space is finalized and user is revisor
+  useEffect(() => {
+    if (
+      space?.isFinalized &&
+      ["REVISOR", "ADMIN_CICLO"].includes(inventoryRole) &&
+      items.length > 0 &&
+      !verificationInitiatedRef.current
+    ) {
+      verificationInitiatedRef.current = true;
+      // Try to initiate verification - it will fail silently if already exists
+      initiateVerification();
+    }
+  }, [space?.isFinalized, inventoryRole, spaceId, items.length]);
 
   const handleCheck = useCallback(
     (itemId, condicao) => {
@@ -382,7 +742,7 @@ export default function RoomPage() {
         enqueueAction({
           endpoint: "/items/check",
           method: "POST",
-          payload: { itemId, condicao, inventoryId },
+          payload: { itemId, condicao, inventoryId, connectionId },
         });
 
         setItems((prev) =>
@@ -420,7 +780,7 @@ export default function RoomPage() {
         enqueueAction({
           endpoint: "/items/relocate",
           method: "POST",
-          payload: { itemId, targetSpaceId, inventoryId },
+          payload: { itemId, targetSpaceId, inventoryId, connectionId },
         });
 
         // Atualiza UI localmente
@@ -530,6 +890,7 @@ export default function RoomPage() {
             sourceSpaceId: pendingMoveCandidate.spaceId,
             targetSpaceId: spaceId,
             count: Number(groupMoveCount),
+            connectionId,
           },
           { headers: { Authorization: `Bearer ${token}` } },
         );
@@ -572,6 +933,7 @@ export default function RoomPage() {
           itemId: pendingMoveCandidate.id,
           targetSpaceId: spaceId,
           inventoryId,
+          connectionId,
         },
       });
 
@@ -671,6 +1033,7 @@ export default function RoomPage() {
           patrimonioFinal,
           condicaoVisual: batchCondicao,
           dryRun: true,
+          connectionId,
         },
         {
           headers: { Authorization: `Bearer ${token}` },
@@ -717,6 +1080,7 @@ export default function RoomPage() {
           patrimonioInicial,
           patrimonioFinal,
           condicaoVisual: batchCondicao,
+          connectionId,
         },
         {
           headers: { Authorization: `Bearer ${token}` },
@@ -838,6 +1202,14 @@ export default function RoomPage() {
     }
   };
 
+  // True when every sampled item has been resolved (verified or not-found)
+  const allVerificationItemsResolved = useMemo(() => {
+    if (!space?.isFinalized) return false;
+    if (!["REVISOR", "ADMIN_CICLO"].includes(inventoryRole)) return false;
+    if (!verificationItems || verificationItems.length === 0) return false;
+    return !items.some((i) => i.verificationStatus === "REVERIFICAR");
+  }, [space?.isFinalized, inventoryRole, verificationItems, items]);
+
   if (loading) return <div className="p-8 text-center">Carregando...</div>;
   if (!space)
     return (
@@ -869,11 +1241,22 @@ export default function RoomPage() {
               <p className="text-sm text-gray-500">
                 Resp: {space.responsibleDisplay || space.responsible}
               </p>
-              <span
-                className={`mt-2 inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${startBadge.className}`}
-              >
-                {startBadge.label}
-              </span>
+              <div className="mt-2 flex flex-col gap-1">
+                <span
+                  className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${startBadge.className}`}
+                >
+                  {startBadge.label}
+                </span>
+                {space.isVerified && space.confirmedBy && (
+                  <span className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold bg-purple-100 text-purple-800">
+                    🟣 Confirmado em{" "}
+                    {space.confirmedAt
+                      ? new Date(space.confirmedAt).toLocaleDateString("pt-BR")
+                      : "--/--/--"}{" "}
+                    por {space.confirmedBy}
+                  </span>
+                )}
+              </div>
             </div>
             <button
               onClick={() => router.push("/dashboard")}
@@ -1294,7 +1677,11 @@ export default function RoomPage() {
                         ? "border-green-500"
                         : relocatedCount > 0
                           ? "border-indigo-500"
-                          : "border-indigo-400"
+                          : row.items.some(
+                                (i) => i.verificationStatus === "REVERIFICAR",
+                              )
+                            ? "border-purple-500"
+                            : "border-indigo-400"
                     }`}
                   >
                     <div
@@ -1358,6 +1745,7 @@ export default function RoomPage() {
                                       itemId: i.id,
                                       condicao: i.condicaoVisual || "EXCELENTE",
                                       inventoryId,
+                                      connectionId,
                                     },
                                   });
                                 });
@@ -1449,11 +1837,17 @@ export default function RoomPage() {
                             <div
                               key={item.id}
                               className={`bg-gray-50 rounded-lg border-l-4 transition-all ${
-                                item.meta?.isRelocated
-                                  ? "border-yellow-500 bg-yellow-50"
-                                  : item.statusEncontrado === "SIM"
-                                    ? "border-green-500"
-                                    : "border-gray-300"
+                                item.verificationStatus ===
+                                "NAO_LOCALIZADO_VERIFICACAO"
+                                  ? "border-red-500 bg-red-50"
+                                  : item.verificationStatus === "REVERIFICAR" ||
+                                      verificationItems?.includes(item.id)
+                                    ? "border-purple-500 bg-purple-50"
+                                    : item.meta?.isRelocated
+                                      ? "border-yellow-500 bg-yellow-50"
+                                      : item.statusEncontrado === "SIM"
+                                        ? "border-green-500"
+                                        : "border-gray-300"
                               }`}
                             >
                               <div className="p-4">
@@ -1472,16 +1866,23 @@ export default function RoomPage() {
                                       <span className="font-bold text-base">
                                         #{item.patrimonio}
                                       </span>
+                                      {item.verificationStatus ===
+                                        "NAO_LOCALIZADO_VERIFICACAO" && (
+                                        <span className="px-2 py-0.5 bg-red-200 text-red-800 text-xs rounded font-medium">
+                                          ⚠️ Não localizado na verificação
+                                        </span>
+                                      )}
                                       {item.meta?.isRelocated && (
                                         <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
                                           ⚠️ Movido de {item.meta.fromSpaceName}
                                         </span>
                                       )}
-                                      {item.statusEncontrado === "SIM" && (
-                                        <span className="text-green-600 text-sm">
-                                          ✓
-                                        </span>
-                                      )}
+                                      {item.statusEncontrado === "SIM" &&
+                                        !item.verificationStatus && (
+                                          <span className="text-green-600 text-sm">
+                                            ✓
+                                          </span>
+                                        )}
                                     </div>
                                     <p className="text-gray-600 text-xs line-clamp-1">
                                       {item.descricao}
@@ -1489,36 +1890,51 @@ export default function RoomPage() {
                                   </div>
 
                                   <div className="flex flex-wrap gap-2 lg:justify-end">
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleCheck(
-                                          item.id,
-                                          item.condicaoVisual || "EXCELENTE",
-                                        );
-                                      }}
-                                      className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700"
-                                    >
-                                      ✅ Encontrado
-                                    </button>
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setRelocateModal(item);
-                                      }}
-                                      className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700"
-                                    >
-                                      ➡️ Mover
-                                    </button>
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setPendingUnfoundItem(item);
-                                      }}
-                                      className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs hover:bg-red-200"
-                                    >
-                                      🚫 Não localizado
-                                    </button>
+                                    {item.statusEncontrado === "SIM" ||
+                                    item.verificationStatus ===
+                                      "REVERIFICAR" ||
+                                    verificationItems?.includes(
+                                      item.id,
+                                    ) ? null : item.verificationStatus ===
+                                      "NAO_LOCALIZADO_VERIFICACAO" ? (
+                                      <span className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-medium">
+                                        ⚠️ Aguardando conferente
+                                      </span>
+                                    ) : (
+                                      <>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleCheck(
+                                              item.id,
+                                              item.condicaoVisual ||
+                                                "EXCELENTE",
+                                            );
+                                          }}
+                                          className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700"
+                                        >
+                                          ✅ Encontrado
+                                        </button>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setRelocateModal(item);
+                                          }}
+                                          className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700"
+                                        >
+                                          ➡️ Mover
+                                        </button>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setPendingUnfoundItem(item);
+                                          }}
+                                          className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs hover:bg-red-200"
+                                        >
+                                          🚫 Não localizado
+                                        </button>
+                                      </>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -1629,11 +2045,16 @@ export default function RoomPage() {
               <div
                 key={item.id}
                 className={`bg-white rounded-xl shadow border-l-4 transition-all ${
-                  item.meta?.isRelocated
-                    ? "border-yellow-500 bg-yellow-50"
-                    : item.statusEncontrado === "SIM"
-                      ? "border-green-500"
-                      : "border-gray-300"
+                  item.verificationStatus === "NAO_LOCALIZADO_VERIFICACAO"
+                    ? "border-red-500 bg-red-50"
+                    : item.verificationStatus === "REVERIFICAR" ||
+                        verificationItems?.includes(item.id)
+                      ? "border-purple-500 bg-purple-50"
+                      : item.meta?.isRelocated
+                        ? "border-yellow-500 bg-yellow-50"
+                        : item.statusEncontrado === "SIM"
+                          ? "border-green-500"
+                          : "border-gray-300"
                 }`}
               >
                 {/* Card Colapsado */}
@@ -1651,14 +2072,21 @@ export default function RoomPage() {
                         <span className="font-bold text-lg">
                           #{item.patrimonio}
                         </span>
+                        {item.verificationStatus ===
+                          "NAO_LOCALIZADO_VERIFICACAO" && (
+                          <span className="px-2 py-0.5 bg-red-200 text-red-800 text-xs rounded font-medium">
+                            ⚠️ Não localizado na verificação
+                          </span>
+                        )}
                         {item.meta?.isRelocated && (
                           <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
                             ⚠️ Movido de {item.meta.fromSpaceName}
                           </span>
                         )}
-                        {item.statusEncontrado === "SIM" && (
-                          <span className="text-green-600 text-sm">✓</span>
-                        )}
+                        {item.statusEncontrado === "SIM" &&
+                          !item.verificationStatus && (
+                            <span className="text-green-600 text-sm">✓</span>
+                          )}
                       </div>
                       <p className="text-gray-700 text-sm line-clamp-1">
                         {item.descricao}
@@ -1666,36 +2094,47 @@ export default function RoomPage() {
                     </div>
 
                     <div className="flex flex-wrap gap-2 lg:justify-end">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleCheck(
-                            item.id,
-                            item.condicaoVisual || "EXCELENTE",
-                          );
-                        }}
-                        className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700"
-                      >
-                        ✅ Encontrado
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRelocateModal(item);
-                        }}
-                        className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
-                      >
-                        ➡️ Mover
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setPendingUnfoundItem(item);
-                        }}
-                        className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-sm hover:bg-red-200"
-                      >
-                        🚫 Não localizado
-                      </button>
+                      {item.statusEncontrado === "SIM" ||
+                      item.verificationStatus === "REVERIFICAR" ||
+                      verificationItems?.includes(item.id) ? null : item.verificationStatus ===
+                        "NAO_LOCALIZADO_VERIFICACAO" ? (
+                        <span className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-medium">
+                          ⚠️ Aguardando conferente
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCheck(
+                                item.id,
+                                item.condicaoVisual || "EXCELENTE",
+                              );
+                            }}
+                            className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700"
+                          >
+                            ✅ Encontrado
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRelocateModal(item);
+                            }}
+                            className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+                          >
+                            ➡️ Mover
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPendingUnfoundItem(item);
+                            }}
+                            className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-sm hover:bg-red-200"
+                          >
+                            🚫 Não localizado
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1775,13 +2214,46 @@ export default function RoomPage() {
         ) : null}
 
         {activeTab === "itens" ? (
-          <div className="flex justify-end pt-4">
-            <button
-              onClick={() => setIsFinalizeModalOpen(true)}
-              className="px-6 py-3 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 shadow-lg"
-            >
-              🏁 Sala Finalizada
-            </button>
+          <div className="flex justify-between items-center pt-4 gap-4">
+            {space?.isFinalized &&
+              ["REVISOR", "ADMIN_CICLO"].includes(inventoryRole) && (
+                <div className="text-sm text-slate-600">
+                  {verificationStatus && (
+                    <span className="font-medium">
+                      Revisão: {verificationStatus.verified || 0}/
+                      {verificationStatus.totalToReview || 0} itens verificados
+                    </span>
+                  )}
+                </div>
+              )}
+            <div className="flex gap-3 ml-auto">
+              {space?.isFinalized &&
+                ["REVISOR", "ADMIN_CICLO"].includes(inventoryRole) && (
+                  <button
+                    onClick={() => setIsRevertModalOpen(true)}
+                    className="px-6 py-3 bg-amber-600 text-white rounded-xl font-semibold hover:bg-amber-700 shadow-lg"
+                  >
+                    ↩️ Retornar Etapa
+                  </button>
+                )}
+              {allVerificationItemsResolved && (
+                <button
+                  onClick={handleCompleteVerification}
+                  disabled={saving}
+                  className="px-6 py-3 bg-emerald-600 text-white rounded-xl font-semibold hover:bg-emerald-700 shadow-lg disabled:opacity-50"
+                >
+                  ✅ Finalizar Sala
+                </button>
+              )}
+              {!space?.isFinalized && inventoryRole !== "VISUALIZADOR" && (
+                <button
+                  onClick={() => setIsFinalizeModalOpen(true)}
+                  className="px-6 py-3 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 shadow-lg"
+                >
+                  🏁 Sala Finalizada
+                </button>
+              )}
+            </div>
           </div>
         ) : null}
       </main>
@@ -1989,6 +2461,17 @@ export default function RoomPage() {
         title="Confirmar encontrado em massa"
         message={`Aplicar status de encontrado para ${batchPreview?.matchedCount || 0} item(ns) no intervalo informado?`}
         confirmText="Aplicar em massa"
+        cancelText="Cancelar"
+        variant="warning"
+      />
+
+      <ConfirmModal
+        isOpen={isRevertModalOpen}
+        onConfirm={handleRevertFinalization}
+        onCancel={() => setIsRevertModalOpen(false)}
+        title="Retornar Etapa"
+        message="Tem certeza que deseja retornar esta sala para inspeção dos conferentes? Isso desfará o status de finalização."
+        confirmText="Retornar"
         cancelText="Cancelar"
         variant="warning"
       />

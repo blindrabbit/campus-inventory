@@ -4,6 +4,9 @@ import {
   requireInventoryAccess,
   requireInventoryOperationalWrite,
   requireInventoryWriteAccess,
+  requireInventoryRoles,
+  requireVerificationAccess,
+  requireNotRevisor,
 } from "../middleware/inventory.js";
 import { prisma } from "../prisma/client.js";
 
@@ -58,6 +61,16 @@ async function buildResponsibleLabels(spaces) {
   return labels;
 }
 
+async function resolveUserNames(samAccountNames) {
+  const unique = [...new Set(samAccountNames.filter(Boolean))];
+  if (unique.length === 0) return new Map();
+  const users = await prisma.user.findMany({
+    where: { samAccountName: { in: unique } },
+    select: { samAccountName: true, fullName: true },
+  });
+  return new Map(users.map((u) => [u.samAccountName, u.fullName || u.samAccountName]));
+}
+
 async function ensureUniqueSpaceName(name, inventoryId, excludeId = null) {
   const existing = excludeId
     ? await prisma.$queryRaw`
@@ -105,6 +118,16 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
             },
           },
         },
+        verificationRolls: {
+          where: { result: "PASSED" },
+          select: { id: true },
+          take: 1,
+        },
+        finalizationHistory: {
+          where: { action: { in: ["FINALIZED", "COMPLETED_VERIFICATION"] } },
+          orderBy: { actedAt: "desc" },
+          select: { action: true, actedBy: true, actedAt: true },
+        },
       },
       orderBy: { name: "asc" },
       take: q ? 10 : undefined,
@@ -112,28 +135,52 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
 
     const responsibleLabels = await buildResponsibleLabels(spaces);
 
-    const formatted = spaces.map((s) => ({
-      executionStatus: s.isFinalized
-        ? "FINALIZADO"
-        : s.startedAt
-          ? "INICIADO"
-          : "NAO_INICIADO",
-      id: s.id,
-      name: s.name,
-      responsible: s.responsible,
-      responsibleName: responsibleLabels.get(s.responsible) || s.responsible,
-      responsibleDisplay:
-        responsibleLabels.get(s.responsible) &&
-        responsibleLabels.get(s.responsible) !== s.responsible
-          ? `${responsibleLabels.get(s.responsible)} (${s.responsible})`
-          : s.responsible,
-      sector: s.sector,
-      unit: s.unit,
-      itemCount: s._count.items,
-      isFinalized: s.isFinalized,
-      startedAt: s.startedAt,
-      startedBy: s.startedBy,
-    }));
+    // Collect all samAccountNames from finalizationHistory to resolve names in one query
+    const allActors = spaces.flatMap((s) =>
+      s.finalizationHistory.map((h) => h.actedBy),
+    );
+    const actorNames = await resolveUserNames(allActors);
+
+    const formatted = spaces.map((s) => {
+      const finalizedEntry = s.finalizationHistory.find(
+        (h) => h.action === "FINALIZED",
+      );
+      const confirmedEntry = s.finalizationHistory.find(
+        (h) => h.action === "COMPLETED_VERIFICATION",
+      );
+
+      return {
+        executionStatus: s.isFinalized
+          ? "FINALIZADO"
+          : s.startedAt
+            ? "INICIADO"
+            : "NAO_INICIADO",
+        id: s.id,
+        name: s.name,
+        responsible: s.responsible,
+        responsibleName: responsibleLabels.get(s.responsible) || s.responsible,
+        responsibleDisplay:
+          responsibleLabels.get(s.responsible) &&
+          responsibleLabels.get(s.responsible) !== s.responsible
+            ? `${responsibleLabels.get(s.responsible)} (${s.responsible})`
+            : s.responsible,
+        sector: s.sector,
+        unit: s.unit,
+        itemCount: s._count.items,
+        isFinalized: s.isFinalized,
+        isVerified: s.verificationRolls.length > 0,
+        startedAt: s.startedAt,
+        startedBy: s.startedBy,
+        finalizedAt: finalizedEntry?.actedAt || null,
+        finalizedBy: finalizedEntry
+          ? (actorNames.get(finalizedEntry.actedBy) || finalizedEntry.actedBy)
+          : null,
+        confirmedAt: confirmedEntry?.actedAt || null,
+        confirmedBy: confirmedEntry
+          ? (actorNames.get(confirmedEntry.actedBy) || confirmedEntry.actedBy)
+          : null,
+      };
+    });
 
     res.json(formatted);
   } catch (err) {
@@ -148,6 +195,7 @@ router.post(
   requireInventoryAccess(),
   requireInventoryWriteAccess(),
   requireInventoryOperationalWrite(),
+  requireNotRevisor(),
   requireRole("ADMIN", "CONFERENTE"),
   async (req, res) => {
     try {
@@ -159,6 +207,15 @@ router.post(
       if (result.count === 0) {
         return res.status(404).json({ error: "Espaço não encontrado" });
       }
+
+      await prisma.finalizationHistory.create({
+        data: {
+          spaceId: id,
+          action: "FINALIZED",
+          actedBy: req.user.sub,
+        },
+      });
+
       res.json({ success: true, message: "Espaço finalizado" });
     } catch (err) {
       console.error("Error finalizing space:", err);
@@ -275,7 +332,7 @@ router.post(
   verifyJWT,
   requireInventoryAccess(),
   requireInventoryWriteAccess(),
-  requireRole("ADMIN"),
+  requireInventoryRoles("ADMIN_CICLO", "REVISOR"),
   createSpaceHandler,
 );
 router.post(
@@ -283,7 +340,7 @@ router.post(
   verifyJWT,
   requireInventoryAccess(),
   requireInventoryWriteAccess(),
-  requireRole("ADMIN"),
+  requireInventoryRoles("ADMIN_CICLO", "REVISOR"),
   createSpaceHandler,
 );
 router.get(
@@ -295,30 +352,63 @@ router.get(
     try {
       const spaces = await prisma.space.findMany({
         where: { inventoryId: req.inventoryId },
-        include: { _count: { select: { items: true } } },
+        include: {
+          _count: { select: { items: true } },
+          verificationRolls: {
+            where: { result: "PASSED" },
+            select: { id: true },
+            take: 1,
+          },
+          finalizationHistory: {
+            where: { action: { in: ["FINALIZED", "COMPLETED_VERIFICATION"] } },
+            orderBy: { actedAt: "desc" },
+            select: { action: true, actedBy: true, actedAt: true },
+          },
+        },
         orderBy: { name: "asc" },
       });
 
       const responsibleLabels = await buildResponsibleLabels(spaces);
+      const allActors = spaces.flatMap((s) =>
+        s.finalizationHistory.map((h) => h.actedBy),
+      );
+      const actorNames = await resolveUserNames(allActors);
 
       res.json(
-        spaces.map((space) => ({
-          id: space.id,
-          name: space.name,
-          responsible: space.responsible,
-          responsibleName:
-            responsibleLabels.get(space.responsible) || space.responsible,
-          responsibleDisplay:
-            responsibleLabels.get(space.responsible) &&
-            responsibleLabels.get(space.responsible) !== space.responsible
-              ? `${responsibleLabels.get(space.responsible)} (${space.responsible})`
-              : space.responsible,
-          sector: space.sector,
-          unit: space.unit,
-          isActive: space.isActive,
-          isFinalized: space.isFinalized,
-          itemCount: space._count.items,
-        })),
+        spaces.map((space) => {
+          const finalizedEntry = space.finalizationHistory.find(
+            (h) => h.action === "FINALIZED",
+          );
+          const confirmedEntry = space.finalizationHistory.find(
+            (h) => h.action === "COMPLETED_VERIFICATION",
+          );
+          return {
+            id: space.id,
+            name: space.name,
+            responsible: space.responsible,
+            responsibleName:
+              responsibleLabels.get(space.responsible) || space.responsible,
+            responsibleDisplay:
+              responsibleLabels.get(space.responsible) &&
+              responsibleLabels.get(space.responsible) !== space.responsible
+                ? `${responsibleLabels.get(space.responsible)} (${space.responsible})`
+                : space.responsible,
+            sector: space.sector,
+            unit: space.unit,
+            isActive: space.isActive,
+            isFinalized: space.isFinalized,
+            isVerified: space.verificationRolls.length > 0,
+            itemCount: space._count.items,
+            finalizedAt: finalizedEntry?.actedAt || null,
+            finalizedBy: finalizedEntry
+              ? (actorNames.get(finalizedEntry.actedBy) || finalizedEntry.actedBy)
+              : null,
+            confirmedAt: confirmedEntry?.actedAt || null,
+            confirmedBy: confirmedEntry
+              ? (actorNames.get(confirmedEntry.actedBy) || confirmedEntry.actedBy)
+              : null,
+          };
+        }),
       );
     } catch (err) {
       console.error("Error fetching admin spaces:", err);
@@ -331,7 +421,7 @@ router.put(
   verifyJWT,
   requireInventoryAccess(),
   requireInventoryWriteAccess(),
-  requireRole("ADMIN"),
+  requireInventoryRoles("ADMIN_CICLO", "REVISOR"),
   updateSpaceHandler,
 );
 router.put(
@@ -339,7 +429,7 @@ router.put(
   verifyJWT,
   requireInventoryAccess(),
   requireInventoryWriteAccess(),
-  requireRole("ADMIN"),
+  requireInventoryRoles("ADMIN_CICLO", "REVISOR"),
   updateSpaceHandler,
 );
 router.delete(
@@ -357,6 +447,291 @@ router.delete(
   requireInventoryWriteAccess(),
   requireRole("ADMIN"),
   deleteSpaceHandler,
+);
+
+// ========================================
+// REVISOR VERIFICATION ENDPOINTS
+// ========================================
+
+/**
+ * POST /api/spaces/:id/initiate-verification
+ * When a revisor enters a finalized space, automatically create a verification roll
+ * with 10% random sample of items marked for re-verification
+ */
+router.post(
+  "/:id/initiate-verification",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireVerificationAccess(),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      // Verify space exists and is finalized
+      const space = await prisma.space.findUnique({
+        where: { id, inventoryId: req.inventoryId },
+        include: { items: { select: { id: true } } },
+      });
+
+      if (!space) {
+        return res.status(404).json({ error: "Espaço não encontrado" });
+      }
+
+      if (!space.isFinalized) {
+        return res
+          .status(400)
+          .json({ error: "Espaço não está finalizado" });
+      }
+
+      // Check if verification already exists
+      const existingRoll = await prisma.verificationRoll.findFirst({
+        where: { spaceId: id, result: "PENDING" },
+      });
+
+      if (existingRoll) {
+        return res.status(400).json({
+          error: "Verificação já em andamento para este espaço",
+        });
+      }
+
+      // Calculate 10% (round up)
+      const totalItems = space.items.length;
+      const sampleSize = Math.max(1, Math.ceil(totalItems * 0.1));
+
+      // Randomly select items
+      const shuffled = space.items.sort(() => 0.5 - Math.random());
+      const selectedItems = shuffled.slice(0, sampleSize);
+      const selectedItemIds = selectedItems.map((item) => item.id);
+
+      // Update selected items with verification status
+      await prisma.item.updateMany({
+        where: { id: { in: selectedItemIds } },
+        data: { verificationStatus: "REVERIFICAR" },
+      });
+
+      // Create verification roll
+      const verificationRoll = await prisma.verificationRoll.create({
+        data: {
+          spaceId: id,
+          itemIds: JSON.stringify(selectedItemIds),
+          createdBy: req.user.sub,
+        },
+      });
+
+      res.json({
+        success: true,
+        verificationRoll,
+        selectedItemIds,
+        totalToReview: sampleSize,
+        totalItems,
+      });
+    } catch (err) {
+      console.error("Error initiating verification:", err);
+      res.status(500).json({ error: "Erro ao iniciar verificação" });
+    }
+  },
+);
+
+/**
+ * GET /api/spaces/:id/verification-status
+ * Get current verification status for a finalized space
+ */
+router.get(
+  "/:id/verification-status",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireVerificationAccess(),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const verificationRoll = await prisma.verificationRoll.findFirst({
+        where: { spaceId: id, result: "PENDING" },
+      });
+
+      if (!verificationRoll) {
+        return res.json({ hasActiveVerification: false });
+      }
+
+      const selectedItemIds = JSON.parse(verificationRoll.itemIds);
+      const items = await prisma.item.findMany({
+        where: { id: { in: selectedItemIds } },
+        select: {
+          id: true,
+          patrimonio: true,
+          descricao: true,
+          statusEncontrado: true,
+          verificationStatus: true,
+          verifiedAt: true,
+          verifiedBy: true,
+        },
+      });
+
+      const verified = items.filter((i) => i.verificationStatus !== "REVERIFICAR")
+        .length;
+
+      res.json({
+        hasActiveVerification: true,
+        verificationRoll,
+        items,
+        verified,
+        remaining: items.length - verified,
+      });
+    } catch (err) {
+      console.error("Error checking verification status:", err);
+      res.status(500).json({ error: "Erro ao verificar status" });
+    }
+  },
+);
+
+/**
+ * POST /api/spaces/:id/revert-finalization
+ * Revert a finalized space back to INICIADO status
+ * Used by revisor when items are not found or manual revert
+ */
+router.post(
+  "/:id/revert-finalization",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireVerificationAccess(),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { reason } = req.body || {};
+
+      // Verify space exists and is finalized
+      const space = await prisma.space.findUnique({
+        where: { id, inventoryId: req.inventoryId },
+      });
+
+      if (!space) {
+        return res.status(404).json({ error: "Espaço não encontrado" });
+      }
+
+      if (!space.isFinalized) {
+        return res.status(400).json({ error: "Espaço já não está finalizado" });
+      }
+
+      // Find active verification roll
+      const verificationRoll = await prisma.verificationRoll.findFirst({
+        where: { spaceId: id, result: "PENDING" },
+      });
+
+      // Revert space status
+      await prisma.space.update({
+        where: { id },
+        data: { isFinalized: false },
+      });
+
+      // Clear verification status from all items
+      await prisma.item.updateMany({
+        where: { spaceId: id, verificationStatus: "REVERIFICAR" },
+        data: { verificationStatus: null, verifiedAt: null, verifiedBy: null },
+      });
+
+      // Mark verification failed and delete roll
+      if (verificationRoll) {
+        await prisma.verificationRoll.update({
+          where: { id: verificationRoll.id },
+          data: {
+            result: "REVERTED",
+            reason: reason || "Revisor reverteu a sala",
+            reviewedAt: new Date(),
+          },
+        });
+      }
+
+      // Record finalization history
+      await prisma.finalizationHistory.create({
+        data: {
+          spaceId: id,
+          action: reason === "item_not_found" ? "REVERTED_ITEM_NOT_FOUND" : "REVERTED_BY_REVISOR",
+          reason: reason || "Manual revert by revisor",
+          actedBy: req.user.sub,
+        },
+      });
+
+      res.json({
+        success: true,
+        message: "Sala revertida para inspeção dos conferentes",
+      });
+    } catch (err) {
+      console.error("Error reverting finalization:", err);
+      res.status(500).json({ error: "Erro ao reverter sala" });
+    }
+  },
+);
+
+/**
+ * POST /api/spaces/:id/complete-verification
+ * Called by revisor after all sampled items have been checked.
+ * Marks the verification roll as PASSED and keeps the room finalized.
+ */
+router.post(
+  "/:id/complete-verification",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireVerificationAccess(),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const space = await prisma.space.findUnique({
+        where: { id, inventoryId: req.inventoryId },
+      });
+
+      if (!space) {
+        return res.status(404).json({ error: "Espaço não encontrado" });
+      }
+
+      if (!space.isFinalized) {
+        return res.status(400).json({ error: "Espaço não está finalizado" });
+      }
+
+      const verificationRoll = await prisma.verificationRoll.findFirst({
+        where: { spaceId: id, result: "PENDING" },
+      });
+
+      if (!verificationRoll) {
+        return res
+          .status(400)
+          .json({ error: "Nenhuma verificação ativa para este espaço" });
+      }
+
+      const selectedItemIds = JSON.parse(verificationRoll.itemIds);
+      const unresolvedCount = await prisma.item.count({
+        where: { id: { in: selectedItemIds }, verificationStatus: "REVERIFICAR" },
+      });
+
+      if (unresolvedCount > 0) {
+        return res.status(400).json({
+          error: `Ainda há ${unresolvedCount} item(ns) pendente(s) de verificação`,
+        });
+      }
+
+      await prisma.verificationRoll.update({
+        where: { id: verificationRoll.id },
+        data: { result: "PASSED", reviewedAt: new Date() },
+      });
+
+      await prisma.finalizationHistory.create({
+        data: {
+          spaceId: id,
+          action: "COMPLETED_VERIFICATION",
+          reason: "Verificação concluída com sucesso pelo revisor",
+          actedBy: req.user.sub,
+        },
+      });
+
+      res.json({
+        success: true,
+        message: "Sala finalizada com sucesso após verificação.",
+      });
+    } catch (err) {
+      console.error("Error completing verification:", err);
+      res.status(500).json({ error: "Erro ao concluir verificação" });
+    }
+  },
 );
 
 export default router;
