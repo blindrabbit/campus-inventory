@@ -44,9 +44,7 @@ export default function LoginPage() {
         onSubmit={handleSubmit}
         className="bg-white p-8 rounded-lg shadow-md w-96"
       >
-        <h1 className="text-2xl font-bold mb-6 text-center">
-          Campus Inventory
-        </h1>
+        <h1 className="text-2xl font-bold mb-6 text-center">Inventário</h1>
 
         {error && (
           <div className="bg-red-100 text-red-700 p-3 rounded mb-4">

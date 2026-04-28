@@ -1,4 +1,4 @@
-# Constitution: Campus Inventory Mapping System
+# Constitution: Inventário - Sistema de Mapeamento de Inventário do Campus
 
 ## 🎯 Propósito
 Sistema web colaborativo para mapeamento, consulta e gestão de inventário físico do campus, permitindo que múltiplos usuários cadastrem, localizem e auditem itens em tempo real.

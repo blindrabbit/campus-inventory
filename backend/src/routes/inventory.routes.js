@@ -13,6 +13,7 @@ import {
   ensureInventoryBootstrapForUser,
   findUserBySamAccountName,
 } from "../services/inventory.js";
+import { parseInventoryCsv } from "../utils/inventory-import.js";
 import { repairMojibake } from "../utils/pdf-text.js";
 import {
   findDirectoryUserBySam,
@@ -466,6 +467,12 @@ const isPdfUpload = (file) => {
   const mime = file?.mimetype?.toLowerCase() || "";
   const name = file?.originalname?.toLowerCase() || "";
   return mime.includes("pdf") || name.endsWith(".pdf");
+};
+
+const isCsvUpload = (file) => {
+  const mime = file?.mimetype?.toLowerCase() || "";
+  const name = file?.originalname?.toLowerCase() || "";
+  return mime.includes("csv") || name.endsWith(".csv");
 };
 
 const canTransitionStatus = (fromStatus, toStatus) => {
@@ -1041,13 +1048,15 @@ router.post("/", verifyJWT, upload.single("xlsxFile"), async (req, res) => {
       if (!req.file?.buffer) {
         return res.status(400).json({
           error:
-            "Arquivo XLSX ou PDF é obrigatório quando a fonte de dados é UPLOAD_XLSX",
+            "Arquivo XLSX, CSV ou PDF é obrigatório quando a fonte de dados é UPLOAD_XLSX",
         });
       }
 
       uploadValidation = isPdfUpload(req.file)
         ? await parseInventoryPdf(req.file.buffer)
-        : await parseInventoryWorkbook(req.file.buffer);
+        : isCsvUpload(req.file)
+          ? await parseInventoryCsv(req.file.buffer)
+          : await parseInventoryWorkbook(req.file.buffer);
       if (!uploadValidation.valid) {
         return res.status(400).json({
           error: uploadValidation.error,

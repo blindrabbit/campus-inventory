@@ -954,9 +954,7 @@ export default function DashboardPage() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="space-y-4">
               <div>
-                <h1 className="text-3xl font-bold text-gray-900">
-                  Campus Inventory
-                </h1>
+                <h1 className="text-3xl font-bold text-gray-900">Inventário</h1>
                 <p className="text-sm text-gray-500 mt-1">
                   Sistema de Conferência de Patrimônio
                 </p>
@@ -988,7 +986,8 @@ export default function DashboardPage() {
             <div className="flex items-center gap-4 self-start lg:self-auto">
               <div className="text-right">
                 <p className="text-sm font-semibold text-gray-800">
-                  {user?.samAccountName} - {user?.fullName?.split(" ")[0] || user?.fullName}
+                  {user?.samAccountName} -{" "}
+                  {user?.fullName?.split(" ")[0] || user?.fullName}
                 </p>
                 <p className="text-xs text-gray-500">
                   {activeInventory?.role || user?.role}
@@ -1628,7 +1627,10 @@ export default function DashboardPage() {
                                 >
                                   <td className="px-3 py-2">
                                     <p className="font-medium text-slate-900">
-                                      {result.samAccountName} - {result.givenName || result.fullName?.split(" ")[0] || result.fullName}
+                                      {result.samAccountName} -{" "}
+                                      {result.givenName ||
+                                        result.fullName?.split(" ")[0] ||
+                                        result.fullName}
                                     </p>
                                   </td>
                                   <td className="px-3 py-2 text-xs text-slate-600">
@@ -1688,7 +1690,9 @@ export default function DashboardPage() {
                                 >
                                   <td className="px-3 py-2">
                                     <p className="font-medium text-slate-900">
-                                      {member.samAccountName} - {member.fullName?.split(" ")[0] || member.fullName}
+                                      {member.samAccountName} -{" "}
+                                      {member.fullName?.split(" ")[0] ||
+                                        member.fullName}
                                     </p>
                                   </td>
                                   <td className="px-3 py-2">

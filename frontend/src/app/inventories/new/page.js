@@ -200,7 +200,8 @@ export default function NewInventoryPage() {
       showToast({
         type: "warning",
         title: "Arquivo obrigatório",
-        message: "Selecione um arquivo XLSX ou PDF para criação por upload.",
+        message:
+          "Selecione um arquivo XLSX, CSV ou PDF para criação por upload.",
       });
       return;
     }
@@ -742,7 +743,7 @@ export default function NewInventoryPage() {
                 }
                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
               >
-                <option value="UPLOAD_XLSX">Upload XLSX</option>
+                <option value="UPLOAD_XLSX">Upload XLSX/CSV/PDF</option>
                 <option value="REUSE_BASE">
                   Reutilizar inventário finalizado
                 </option>
@@ -803,19 +804,19 @@ export default function NewInventoryPage() {
           ) : (
             <div className="rounded-xl border border-slate-200 p-4">
               <label className="block text-sm font-medium text-slate-700">
-                Arquivo do inventário (XLSX ou PDF) *
+                Arquivo do inventário (XLSX, CSV ou PDF) *
               </label>
               <input
                 type="file"
-                accept=".xlsx,.xls,application/pdf,.pdf"
+                accept=".xlsx,.xls,.csv,application/pdf,.pdf,text/csv"
                 onChange={(event) =>
                   setXlsxFile(event.target.files?.[0] || null)
                 }
                 className="mt-2 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
               />
               <p className="mt-2 text-xs text-slate-600">
-                O arquivo (XLSX/PDF) será validado no backend antes da criação
-                do inventário.
+                O arquivo (XLSX/CSV/PDF) será validado no backend antes da
+                criação do inventário.
               </p>
             </div>
           )}
@@ -836,7 +837,8 @@ export default function NewInventoryPage() {
           {ownerSelection ? (
             <div className="rounded-lg bg-slate-50 p-3 text-xs text-slate-700 ring-1 ring-slate-200">
               Responsável selecionado: {ownerSelection.samAccountName} -{" "}
-              {ownerSelection.fullName?.split(" ")[0] || ownerSelection.fullName}
+              {ownerSelection.fullName?.split(" ")[0] ||
+                ownerSelection.fullName}
             </div>
           ) : null}
 
@@ -884,7 +886,8 @@ export default function NewInventoryPage() {
               {pendingMember ? (
                 <p className="text-xs text-slate-600">
                   Selecionado: {pendingMember.samAccountName} -{" "}
-                  {pendingMember.fullName?.split(" ")[0] || pendingMember.fullName}
+                  {pendingMember.fullName?.split(" ")[0] ||
+                    pendingMember.fullName}
                 </p>
               ) : null}
             </div>
@@ -898,7 +901,8 @@ export default function NewInventoryPage() {
                   >
                     <span>
                       {member.samAccountName} -{" "}
-                      {member.fullName?.split(" ")[0] || member.fullName} ({member.role})
+                      {member.fullName?.split(" ")[0] || member.fullName} (
+                      {member.role})
                     </span>
                     <button
                       type="button"

@@ -1,7 +1,7 @@
 // frontend/src/lib/syncQueue.js
 import localforage from "localforage";
 
-const QUEUE_KEY = "campus_inventory_sync_queue";
+const QUEUE_KEY = "inventario_sync_queue";
 const isBrowser = typeof window !== "undefined";
 let isOnline = isBrowser ? navigator.onLine : true;
 let queue = [];

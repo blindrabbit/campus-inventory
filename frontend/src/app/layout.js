@@ -5,8 +5,8 @@ import AxiosAuthGuard from "../components/AxiosAuthGuard";
 
 export const metadata = {
   title: {
-    default: "Campus Inventory",
-    template: "%s | Campus Inventory",
+    default: "Inventário",
+    template: "%s | Inventário",
   },
   description: "Sistema de conferência de patrimônio do Campus Aracruz.",
   icons: {
