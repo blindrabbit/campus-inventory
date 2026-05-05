@@ -36,6 +36,9 @@ export function useSSE({ inventoryId, spaceId, enabled = true }) {
     const knownEvents = [
       "item_relocated",
       "item_checked",
+      "item_unfound",
+      "item_unchecked",
+      "item_verified",
       "group_relocated",
       "item_restored",
       "batch_checked",

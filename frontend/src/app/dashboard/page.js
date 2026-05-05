@@ -8,6 +8,7 @@ import Modal from "../../components/Modal/Modal";
 import ModalBody from "../../components/Modal/ModalBody";
 import ModalFooter from "../../components/Modal/ModalFooter";
 import SpaceSearchBar from "../../components/SpaceSearchBar/SpaceSearchBar";
+import StrategicDashboardPanel from "../../components/StrategicDashboardPanel/StrategicDashboardPanel";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 const INVENTORY_ROLES = [
@@ -44,6 +45,10 @@ const DASHBOARD_TABS = [
   {
     id: "espacos",
     label: "Espaços",
+  },
+  {
+    id: "estrategico",
+    label: "Acompanhamento",
   },
   {
     id: "usuarios",
@@ -115,6 +120,11 @@ export default function DashboardPage() {
   const [unfoundActionModal, setUnfoundActionModal] = useState(null); // { item, action }
   const [unfoundCondicao, setUnfoundCondicao] = useState("EXCELENTE");
   const [savingUnfoundAction, setSavingUnfoundAction] = useState(false);
+  const [dashboardSummary, setDashboardSummary] = useState(null);
+  const [dashboardSummaryLoading, setDashboardSummaryLoading] = useState(false);
+  const [dashboardSummaryError, setDashboardSummaryError] = useState("");
+  const [dashboardSummaryDenied, setDashboardSummaryDenied] = useState(false);
+  const [dashboardRecentEvents, setDashboardRecentEvents] = useState([]);
   const router = useRouter();
   const { showToast } = useToast();
 
@@ -126,11 +136,12 @@ export default function DashboardPage() {
   const { lastEvent } = useSSE({
     inventoryId: currentInventoryId,
     spaceId: null, // no space filter — see all events for this inventory
-    enabled: !!currentInventoryId,
+    enabled: !!currentInventoryId && activeTab === "estrategico",
   });
 
   // React to SSE events — show toast and refresh data
   const loadSpacesRef = useRef(null);
+  const loadDashboardSummaryRef = useRef(null);
   useEffect(() => {
     if (!lastEvent) return;
     const token = localStorage.getItem("token");
@@ -148,6 +159,18 @@ export default function DashboardPage() {
       item_checked: {
         title: "✅ Item conferido",
         msg: `${lastEvent.data.user} marcou um item como encontrado.`,
+      },
+      item_unfound: {
+        title: "Item nao localizado",
+        msg: `${lastEvent.data.user} marcou um item como nao localizado.`,
+      },
+      item_unchecked: {
+        title: "Conferencia desfeita",
+        msg: `${lastEvent.data.user} desfez a conferencia de um item.`,
+      },
+      item_verified: {
+        title: "Item verificado",
+        msg: `${lastEvent.data.user} confirmou um item na reverificacao.`,
       },
       batch_checked: {
         title: "✅ Conferência em massa",
@@ -170,12 +193,23 @@ export default function DashboardPage() {
     const c = config[lastEvent.type];
     if (c) {
       showToast({ type: "info", title: c.title, message: c.msg });
+      setDashboardRecentEvents((prev) => {
+        const nextEvent = {
+          type: lastEvent.type,
+          data: lastEvent.data,
+          receivedAt: new Date().toISOString(),
+        };
+        return [nextEvent, ...prev].slice(0, 8);
+      });
       // Refresh dashboard data
       if (loadSpacesRef.current) {
         loadSpacesRef.current(token, currentInventoryId);
       }
+      if (!dashboardSummaryDenied && loadDashboardSummaryRef.current) {
+        loadDashboardSummaryRef.current(token, currentInventoryId);
+      }
     }
-  }, [lastEvent, showToast, currentInventoryId]);
+  }, [lastEvent, showToast, currentInventoryId, dashboardSummaryDenied]);
 
   const isInventoryAdmin = useMemo(() => {
     if (user?.role === "ADMIN") return true;
@@ -340,6 +374,12 @@ export default function DashboardPage() {
       if (activeTab === "nao-localizados") {
         loadUnfoundItems(token);
       }
+
+      if (activeTab === "estrategico") {
+        setDashboardRecentEvents([]);
+        // fire-and-forget load of the summary when switching to the tab
+        loadDashboardSummary(token, localStorage.getItem("activeInventoryId"));
+      }
     }
   }, [activeTab, visibleTabs, unfoundSubTab]);
 
@@ -404,7 +444,9 @@ export default function DashboardPage() {
     setLoading(true);
 
     const loadForInventory = async () => {
+      setDashboardRecentEvents([]);
       await loadSpaces(token, inventoryId);
+      await loadDashboardSummary(token, inventoryId);
 
       if (user?.role === "ADMIN" || activeInventory?.role === "ADMIN_CICLO") {
         await Promise.all([
@@ -665,6 +707,10 @@ export default function DashboardPage() {
     }
   };
 
+  loadDashboardSummaryRef.current = async (token, inventoryId) => {
+    await loadDashboardSummary(token, inventoryId);
+  };
+
   const handleToggleItemSelection = (itemId) => {
     const newSelected = new Set(selectedItems);
     if (newSelected.has(itemId)) {
@@ -757,6 +803,37 @@ export default function DashboardPage() {
           error.response?.data?.error ||
           "Não foi possível carregar os dados administrativos do inventário.",
       });
+    }
+  };
+
+  const loadDashboardSummary = async (token, inventoryId) => {
+    if (!token || !inventoryId) return;
+
+    setDashboardSummaryLoading(true);
+    setDashboardSummaryError("");
+    setDashboardSummaryDenied(false);
+
+    try {
+      const { data } = await axios.get(`${API}/dashboard/summary`, {
+        params: { inventoryId },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      setDashboardSummary(data || null);
+    } catch (error) {
+      if (error.response?.status === 403) {
+        setDashboardSummary(null);
+        setDashboardSummaryDenied(true);
+        return;
+      }
+
+      setDashboardSummary(null);
+      setDashboardSummaryError(
+        error.response?.data?.error ||
+          "Não foi possível carregar o painel estratégico.",
+      );
+    } finally {
+      setDashboardSummaryLoading(false);
     }
   };
 
@@ -1175,6 +1252,8 @@ export default function DashboardPage() {
 
       {/* Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Strategic panel moved to its own tab (Acompanhamento) */}
+
         <div className="mb-6 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
           <div className="hidden sm:block">
             <nav className="flex items-center gap-2 overflow-x-auto">
@@ -1257,6 +1336,21 @@ export default function DashboardPage() {
               </div>
             ) : null}
           </div>
+        ) : null}
+
+        {activeTab === "estrategico" ? (
+          <StrategicDashboardPanel
+            visible={
+              !dashboardSummaryDenied &&
+              (dashboardSummaryLoading ||
+                Boolean(dashboardSummary) ||
+                Boolean(dashboardSummaryError))
+            }
+            loading={dashboardSummaryLoading}
+            summary={dashboardSummary}
+            error={dashboardSummaryError}
+            recentEvents={dashboardRecentEvents}
+          />
         ) : null}
 
         {activeTab === "espacos" && sortedSpaces.length === 0 ? (
@@ -1584,7 +1678,8 @@ export default function DashboardPage() {
                                 <div className="max-h-72 space-y-1 overflow-y-auto p-3">
                                   {items.map((item) => {
                                     const isSealed = item.space?.isFinalized;
-                                    const isRevisorVerified = item.space?.isVerifiedByRevisor;
+                                    const isRevisorVerified =
+                                      item.space?.isVerifiedByRevisor;
                                     return (
                                       <label
                                         key={item.id}
@@ -1600,29 +1695,39 @@ export default function DashboardPage() {
                                           type="checkbox"
                                           checked={selectedItems.has(item.id)}
                                           onChange={() =>
-                                            !isSealed && handleToggleItemSelection(item.id)
+                                            !isSealed &&
+                                            handleToggleItemSelection(item.id)
                                           }
                                           disabled={isSealed}
                                           className="mt-1 disabled:opacity-40"
                                         />
                                         <div className="flex-1 text-sm">
                                           <div className="flex items-center gap-2 flex-wrap">
-                                            <p className={`font-medium ${isSealed ? "text-purple-900" : "text-slate-900"}`}>
+                                            <p
+                                              className={`font-medium ${isSealed ? "text-purple-900" : "text-slate-900"}`}
+                                            >
                                               #{item.patrimonio}
                                             </p>
                                             {isSealed && (
                                               <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700">
-                                                🔒 {isRevisorVerified ? "Revisado — sala lacrada" : "Sala lacrada"}
+                                                🔒{" "}
+                                                {isRevisorVerified
+                                                  ? "Revisado — sala lacrada"
+                                                  : "Sala lacrada"}
                                               </span>
                                             )}
                                           </div>
-                                          <p className={`text-xs ${isSealed ? "text-purple-600" : "text-slate-600"}`}>
+                                          <p
+                                            className={`text-xs ${isSealed ? "text-purple-600" : "text-slate-600"}`}
+                                          >
                                             {item.space?.name} •{" "}
                                             {item.condicaoVisual}
                                           </p>
                                           {isSealed && (
                                             <p className="mt-0.5 text-xs text-purple-500">
-                                              Para mover este item, a sala precisa ser reaberta pelo administrador.
+                                              Para mover este item, a sala
+                                              precisa ser reaberta pelo
+                                              administrador.
                                             </p>
                                           )}
                                         </div>

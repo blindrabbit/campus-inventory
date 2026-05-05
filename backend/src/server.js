@@ -11,6 +11,8 @@ import exportRoutes from "./routes/export.routes.js";
 import inventoryRoutes from "./routes/inventory.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import eventsRoutes from "./routes/events.routes.js";
+import { ensureSpaceCountersTable } from "./services/metrics.js";
+import dashboardRoutes from "./routes/dashboard.routes.js";
 
 const app = express();
 const isProduction = process.env.NODE_ENV === "production";
@@ -67,6 +69,7 @@ app.use("/api/export", exportRoutes);
 app.use("/api/inventories", inventoryRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/events", eventsRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 
 // Health check
 app.get("/api/health", (req, res) =>
@@ -81,6 +84,14 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
-});
+(async () => {
+  try {
+    await ensureSpaceCountersTable();
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error("Failed to initialize backend:", err);
+    process.exit(1);
+  }
+})();

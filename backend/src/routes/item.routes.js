@@ -9,6 +9,7 @@ import {
 import { prisma } from "../prisma/client.js";
 import { recordItemHistory } from "../services/audit.js";
 import { broadcast } from "../services/sse.js";
+import { recomputeSpaceCounters } from "../services/metrics.js";
 
 const router = Router();
 
@@ -395,6 +396,16 @@ router.post(
         },
       });
 
+      // Recompute counters for the affected space (best-effort)
+      try {
+        await recomputeSpaceCounters(item.spaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after check:",
+          err.message || err,
+        );
+      }
+
       res.json({ success: true, savedAt: new Date() });
     } catch (err) {
       console.error("[CHECK] ERROR:", err.message || err);
@@ -442,7 +453,11 @@ router.post(
       }
 
       if (targetSpace.isFinalized) {
-        return res.status(409).json({ error: "A sala de destino está finalizada e não pode receber itens" });
+        return res
+          .status(409)
+          .json({
+            error: "A sala de destino está finalizada e não pode receber itens",
+          });
       }
 
       const sourceSpace = await prisma.space.findUnique({
@@ -450,7 +465,11 @@ router.post(
         select: { isFinalized: true },
       });
       if (sourceSpace?.isFinalized) {
-        return res.status(409).json({ error: "Esta sala está finalizada e não pode ter itens removidos" });
+        return res
+          .status(409)
+          .json({
+            error: "Esta sala está finalizada e não pode ter itens removidos",
+          });
       }
 
       if (item.spaceId === targetSpaceId) {
@@ -536,6 +555,17 @@ router.post(
         },
       });
 
+      // Recompute counters for source and destination spaces
+      try {
+        await recomputeSpaceCounters(targetSpaceId, req.inventoryId);
+        await recomputeSpaceCounters(item.spaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after relocate:",
+          err.message || err,
+        );
+      }
+
       res.json({
         success: true,
         message: "Item realocado - aguardando confirmação no destino",
@@ -594,7 +624,11 @@ router.post(
       }
 
       if (targetSpace.isFinalized) {
-        return res.status(409).json({ error: "A sala de destino está finalizada e não pode receber itens" });
+        return res
+          .status(409)
+          .json({
+            error: "A sala de destino está finalizada e não pode receber itens",
+          });
       }
 
       const sourceSpace = await prisma.space.findUnique({
@@ -602,7 +636,11 @@ router.post(
         select: { isFinalized: true },
       });
       if (sourceSpace?.isFinalized) {
-        return res.status(409).json({ error: "Esta sala está finalizada e não pode ter itens removidos" });
+        return res
+          .status(409)
+          .json({
+            error: "Esta sala está finalizada e não pode ter itens removidos",
+          });
       }
 
       if (items.length === 0) {
@@ -677,6 +715,17 @@ router.post(
         },
       });
 
+      // Recompute counters for both spaces affected by the group move
+      try {
+        await recomputeSpaceCounters(targetSpaceId, req.inventoryId);
+        await recomputeSpaceCounters(sourceSpaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after group relocate:",
+          err.message || err,
+        );
+      }
+
       res.json({
         success: true,
         movedCount: items.length,
@@ -732,6 +781,36 @@ router.post(
         spaceId: item.spaceId,
         user,
       });
+
+      // Optionally exclude the triggering client session from receiving this broadcast
+      const connectionId = req.body?.connectionId;
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      // Notify other users watching this space that an item was marked as not found
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: item.spaceId,
+        action: "item_unfound",
+        excludeClientId,
+        payload: {
+          itemId,
+          spaceId: item.spaceId,
+          action: "NAO_LOCALIZADO",
+          user: user.fullName || user.sub,
+          timestamp: new Date(),
+        },
+      });
+
+      try {
+        await recomputeSpaceCounters(item.spaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after unfound:",
+          err.message || err,
+        );
+      }
 
       res.json({ success: true });
     } catch (err) {
@@ -789,6 +868,35 @@ router.post(
         action: "DESFEITO_ENCONTRADO",
         createdBy: user.sub,
       });
+
+      // Broadcast the uncheck action so dashboards / clients update in real time
+      const connectionId = req.body?.connectionId;
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: item.spaceId,
+        action: "item_unchecked",
+        excludeClientId,
+        payload: {
+          itemId,
+          spaceId: item.spaceId,
+          action: "DESFEITO_ENCONTRADO",
+          user: user.fullName || user.sub,
+          timestamp: new Date(),
+        },
+      });
+
+      try {
+        await recomputeSpaceCounters(item.spaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after uncheck:",
+          err.message || err,
+        );
+      }
 
       res.json({ success: true });
     } catch (err) {
@@ -860,6 +968,18 @@ router.post(
           timestamp: new Date(),
         },
       });
+
+      try {
+        await recomputeSpaceCounters(
+          item.lastKnownSpaceId || item.spaceId,
+          req.inventoryId,
+        );
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after restore:",
+          err.message || err,
+        );
+      }
 
       res.json({ success: true });
     } catch (err) {
@@ -1042,6 +1162,15 @@ router.post(
         },
       });
 
+      try {
+        await recomputeSpaceCounters(spaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after batch check:",
+          err.message || err,
+        );
+      }
+
       res.json({
         success: true,
         updatedCount: matchedItems.length,
@@ -1199,6 +1328,15 @@ router.post(
           timestamp: new Date(),
         },
       });
+
+      try {
+        await recomputeSpaceCounters(spaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after batch unfound:",
+          err.message || err,
+        );
+      }
 
       res.json({
         success: true,
@@ -1386,6 +1524,16 @@ router.post(
           timestamp: movedAt,
         },
       });
+
+      try {
+        await recomputeSpaceCounters(targetSpaceId, req.inventoryId);
+        await recomputeSpaceCounters(spaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after batch relocate:",
+          err.message || err,
+        );
+      }
 
       res.json({
         success: true,
@@ -1593,6 +1741,15 @@ router.post(
           allResolved,
         },
       });
+
+      try {
+        await recomputeSpaceCounters(spaceId, req.inventoryId);
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after verify-check:",
+          err.message || err,
+        );
+      }
 
       res.json({
         success: true,
