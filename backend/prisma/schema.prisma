@@ -85,8 +85,10 @@ model Space {
   inventory     Inventory? @relation(fields: [inventoryId], references: [id], onDelete: SetNull)
   isActive      Boolean    @default(true)
   isFinalized   Boolean    @default(false)
+  isVerifiedByRevisor Boolean @default(false)
   startedAt     DateTime?
   startedBy     String?
+  observacoes   String?
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   
@@ -202,6 +204,7 @@ model Relocation {
   movedBy         String
   movedAt         DateTime @default(now())
   pendingConfirm  Boolean  @default(true)
+  wasUnfound      Boolean  @default(false)
 
   @@map("relocations")
 }

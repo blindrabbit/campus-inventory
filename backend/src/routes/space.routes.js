@@ -12,6 +12,15 @@ import { prisma } from "../prisma/client.js";
 
 const router = Router();
 
+function normalizeString(str) {
+  if (!str) return "";
+  return str
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
 function canResolveResponsible(value) {
   if (!value) return false;
   const normalized = value.toString().trim();
@@ -99,11 +108,6 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
       inventoryId: req.inventoryId,
       isActive: true,
       ...(includeFinalized ? {} : { isFinalized: false }),
-      ...(q
-        ? {
-            name: { contains: q },
-          }
-        : {}),
     };
 
     const spaces = await prisma.space.findMany({
@@ -129,58 +133,72 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
           select: { action: true, actedBy: true, actedAt: true },
         },
       },
-      orderBy: { name: "asc" },
-      take: q ? 10 : undefined,
+      take: q ? 1000 : undefined,
     });
 
-    const responsibleLabels = await buildResponsibleLabels(spaces);
+    // Filter by search term with accent normalization
+    const filtered = !q
+      ? spaces
+      : spaces.filter((space) =>
+          normalizeString(space.name).includes(normalizeString(q)),
+        );
+
+    const responsibleLabels = await buildResponsibleLabels(filtered);
 
     // Collect all samAccountNames from finalizationHistory to resolve names in one query
-    const allActors = spaces.flatMap((s) =>
+    const allActors = filtered.flatMap((s) =>
       s.finalizationHistory.map((h) => h.actedBy),
     );
     const actorNames = await resolveUserNames(allActors);
 
-    const formatted = spaces.map((s) => {
-      const finalizedEntry = s.finalizationHistory.find(
-        (h) => h.action === "FINALIZED",
-      );
-      const confirmedEntry = s.finalizationHistory.find(
-        (h) => h.action === "COMPLETED_VERIFICATION",
-      );
+    const formatted = filtered
+      .map((s) => {
+        const finalizedEntry = s.finalizationHistory.find(
+          (h) => h.action === "FINALIZED",
+        );
+        const confirmedEntry = s.finalizationHistory.find(
+          (h) => h.action === "COMPLETED_VERIFICATION",
+        );
 
-      return {
-        executionStatus: s.isFinalized
-          ? "FINALIZADO"
-          : s.startedAt
-            ? "INICIADO"
-            : "NAO_INICIADO",
-        id: s.id,
-        name: s.name,
-        responsible: s.responsible,
-        responsibleName: responsibleLabels.get(s.responsible) || s.responsible,
-        responsibleDisplay:
-          responsibleLabels.get(s.responsible) &&
-          responsibleLabels.get(s.responsible) !== s.responsible
-            ? `${responsibleLabels.get(s.responsible)} (${s.responsible})`
-            : s.responsible,
-        sector: s.sector,
-        unit: s.unit,
-        itemCount: s._count.items,
-        isFinalized: s.isFinalized,
-        isVerified: s.verificationRolls.length > 0,
-        startedAt: s.startedAt,
-        startedBy: s.startedBy,
-        finalizedAt: finalizedEntry?.actedAt || null,
-        finalizedBy: finalizedEntry
-          ? (actorNames.get(finalizedEntry.actedBy) || finalizedEntry.actedBy)
-          : null,
-        confirmedAt: confirmedEntry?.actedAt || null,
-        confirmedBy: confirmedEntry
-          ? (actorNames.get(confirmedEntry.actedBy) || confirmedEntry.actedBy)
-          : null,
-      };
-    });
+        return {
+          executionStatus: s.isFinalized
+            ? "FINALIZADO"
+            : s.startedAt
+              ? "INICIADO"
+              : "NAO_INICIADO",
+          id: s.id,
+          name: s.name,
+          responsible: s.responsible,
+          responsibleName:
+            responsibleLabels.get(s.responsible) || s.responsible,
+          responsibleDisplay:
+            responsibleLabels.get(s.responsible) &&
+            responsibleLabels.get(s.responsible) !== s.responsible
+              ? `${responsibleLabels.get(s.responsible)} (${s.responsible})`
+              : s.responsible,
+          sector: s.sector,
+          unit: s.unit,
+          observacoes: s.observacoes || null,
+          itemCount: s._count.items,
+          isFinalized: s.isFinalized,
+          isVerifiedByRevisor: s.isVerifiedByRevisor,
+          isVerified: s.verificationRolls.length > 0,
+          startedAt: s.startedAt,
+          startedBy: s.startedBy,
+          finalizedAt: finalizedEntry?.actedAt || null,
+          finalizedBy: finalizedEntry
+            ? actorNames.get(finalizedEntry.actedBy) || finalizedEntry.actedBy
+            : null,
+          confirmedAt: confirmedEntry?.actedAt || null,
+          confirmedBy: confirmedEntry
+            ? actorNames.get(confirmedEntry.actedBy) || confirmedEntry.actedBy
+            : null,
+        };
+      })
+      .sort((a, b) =>
+        a.name.localeCompare(b.name, "pt-BR", { sensitivity: "base" }),
+      )
+      .slice(0, q ? 10 : undefined);
 
     res.json(formatted);
   } catch (err) {
@@ -397,6 +415,7 @@ router.get(
             unit: space.unit,
             isActive: space.isActive,
             isFinalized: space.isFinalized,
+            isVerifiedByRevisor: space.isVerifiedByRevisor,
             isVerified: space.verificationRolls.length > 0,
             itemCount: space._count.items,
             finalizedAt: finalizedEntry?.actedAt || null,
@@ -447,6 +466,38 @@ router.delete(
   requireInventoryWriteAccess(),
   requireRole("ADMIN"),
   deleteSpaceHandler,
+);
+
+// ========================================
+// OBSERVATIONS ENDPOINT
+// ========================================
+
+router.patch(
+  "/:id/observacoes",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { observacoes } = req.body;
+
+      const result = await prisma.space.updateMany({
+        where: { id, inventoryId: req.inventoryId },
+        data: { observacoes: observacoes?.toString().trim() || null },
+      });
+
+      if (result.count === 0) {
+        return res.status(404).json({ error: "Espaço não encontrado" });
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Error updating space observations:", err);
+      res.status(500).json({ error: "Erro ao salvar observações" });
+    }
+  },
 );
 
 // ========================================
@@ -617,10 +668,10 @@ router.post(
         where: { spaceId: id, result: "PENDING" },
       });
 
-      // Revert space status
+      // Revert space status and clear reviewer verification flag
       await prisma.space.update({
         where: { id },
-        data: { isFinalized: false },
+        data: { isFinalized: false, isVerifiedByRevisor: false },
       });
 
       // Clear verification status from all items
@@ -714,6 +765,12 @@ router.post(
         data: { result: "PASSED", reviewedAt: new Date() },
       });
 
+      // Mark the space as definitively verified by the revisor (purple state)
+      await prisma.space.update({
+        where: { id },
+        data: { isVerifiedByRevisor: true },
+      });
+
       await prisma.finalizationHistory.create({
         data: {
           spaceId: id,
@@ -725,7 +782,7 @@ router.post(
 
       res.json({
         success: true,
-        message: "Sala finalizada com sucesso após verificação.",
+        message: "Sala verificada e fechada definitivamente pelo revisor.",
       });
     } catch (err) {
       console.error("Error completing verification:", err);

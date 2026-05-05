@@ -39,6 +39,9 @@ export function useSSE({ inventoryId, spaceId, enabled = true }) {
       "group_relocated",
       "item_restored",
       "batch_checked",
+      "batch_unfound",
+      "batch_relocated",
+      "space_auto_reverted",
     ];
 
     knownEvents.forEach((eventType) => {

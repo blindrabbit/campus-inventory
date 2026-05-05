@@ -21,6 +21,15 @@ function normalizePatrimonioNumber(value) {
   return parsed;
 }
 
+function normalizeString(str) {
+  if (!str) return "";
+  return str
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
 async function markSpaceStarted(prismaClient, { inventoryId, spaceId, user }) {
   if (!inventoryId || !spaceId || !user?.sub) return;
 
@@ -68,6 +77,7 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
             fromSpace: { select: { name: true } },
             movedBy: true,
             pendingConfirm: true,
+            wasUnfound: true,
           },
         },
         itemGroup: { select: { id: true, name: true } },
@@ -95,10 +105,11 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
       groupName: item.itemGroup?.name || null,
       meta: item.relocationIn
         ? {
-            isRelocated: true,
+            isRelocated: item.relocationIn.pendingConfirm,
             fromSpaceName: item.relocationIn.fromSpace.name,
             movedBy: item.relocationIn.movedBy,
             pendingConfirm: item.relocationIn.pendingConfirm,
+            wasUnfound: item.relocationIn.wasUnfound,
           }
         : null,
     }));
@@ -144,12 +155,15 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
         .json({ error: "Informe ao menos 2 caracteres para busca" });
     }
 
+    const normalizedQuery = normalizeString(q);
+    const queryAsNumber = normalizePatrimonioNumber(q);
+
     const where = {
       inventoryId: req.inventoryId,
-      OR: [{ patrimonio: { contains: q } }, { descricao: { contains: q } }],
       ...(excludeSpaceId ? { NOT: { spaceId: excludeSpaceId } } : {}),
     };
 
+    // Get all items (or a large batch) to search client-side
     const matches = await prisma.item.findMany({
       where,
       select: {
@@ -172,12 +186,71 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
           },
         },
       },
-      take: 20,
-      orderBy: { patrimonio: "asc" },
     });
 
+    // Filter and score results with priority: patrimonio > descricao
+    const scored = matches
+      .map((item) => {
+        const normalizedPatrimonio = normalizeString(item.patrimonio || "");
+        const normalizedDescricao = normalizeString(item.descricao || "");
+        const itemPatrimonioNumber = normalizePatrimonioNumber(item.patrimonio);
+
+        // Priority scoring:
+        // 0. Patrimonio exact match (numeric): highest priority
+        // 1. Patrimonio exact match (text): high priority
+        // 2. Patrimonio starts with: medium-high priority
+        // 3. Patrimonio contains: medium priority
+        // 4. Description starts with: medium-low priority
+        // 5. Description contains: low priority
+        // 999. No match
+
+        let priority = 999;
+
+        // Numeric exact match is highest priority
+        if (
+          queryAsNumber !== null &&
+          itemPatrimonioNumber !== null &&
+          itemPatrimonioNumber === queryAsNumber
+        ) {
+          priority = 0;
+        } else if (normalizedPatrimonio === normalizedQuery) {
+          priority = 1;
+        } else if (normalizedPatrimonio.startsWith(normalizedQuery)) {
+          priority = 2;
+        } else if (normalizedPatrimonio.includes(normalizedQuery)) {
+          priority = 3;
+        } else if (normalizedDescricao.startsWith(normalizedQuery)) {
+          priority = 4;
+        } else if (normalizedDescricao.includes(normalizedQuery)) {
+          priority = 5;
+        }
+
+        return { item, priority };
+      })
+      .filter((scored) => scored.priority !== 999)
+      .sort((a, b) => {
+        if (a.priority !== b.priority) {
+          return a.priority - b.priority;
+        }
+        // Same priority: sort by patrimonio numerically
+        const aNum = normalizePatrimonioNumber(a.item.patrimonio);
+        const bNum = normalizePatrimonioNumber(b.item.patrimonio);
+        if (aNum !== null && bNum !== null) {
+          return aNum - bNum;
+        }
+        return (a.item.patrimonio || "").localeCompare(
+          b.item.patrimonio || "",
+          "pt-BR",
+          {
+            numeric: true,
+          },
+        );
+      })
+      .slice(0, 20)
+      .map(({ item }) => item);
+
     res.json(
-      matches.map((item) => ({
+      scored.map((item) => ({
         id: item.id,
         patrimonio: item.patrimonio,
         descricao: item.descricao,
@@ -185,7 +258,11 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
         spaceName: item.space?.name || "Sem localização",
         itemGroupId: item.itemGroupId || null,
         itemGroup: item.itemGroup
-          ? { id: item.itemGroup.id, name: item.itemGroup.name, totalItems: item.itemGroup._count.items }
+          ? {
+              id: item.itemGroup.id,
+              name: item.itemGroup.name,
+              totalItems: item.itemGroup._count.items,
+            }
           : null,
       })),
     );
@@ -336,6 +413,7 @@ router.post(
           spaceId: true,
           lastKnownSpaceId: true,
           inventoryId: true,
+          statusEncontrado: true,
         },
       });
 
@@ -375,6 +453,7 @@ router.post(
           },
         });
 
+        const wasUnfound = item.statusEncontrado === "NAO";
         await tx.relocation.upsert({
           where: { itemId },
           create: {
@@ -384,6 +463,7 @@ router.post(
             movedBy: user.sub,
             movedAt,
             pendingConfirm: true,
+            wasUnfound,
           },
           update: {
             fromSpaceId: item.spaceId,
@@ -391,6 +471,7 @@ router.post(
             movedBy: user.sub,
             movedAt,
             pendingConfirm: true,
+            wasUnfound,
           },
         });
 
@@ -405,12 +486,6 @@ router.post(
               ? JSON.stringify({ groupMoveCount: Number(groupMoveCount) })
               : null,
         });
-      });
-
-      await markSpaceStarted(prisma, {
-        inventoryId: req.inventoryId,
-        spaceId: item.spaceId,
-        user,
       });
 
       console.log(
@@ -486,7 +561,7 @@ router.post(
             itemGroupId,
             spaceId: sourceSpaceId,
           },
-          select: { id: true },
+          select: { id: true, statusEncontrado: true },
           take: qty,
         }),
       ]);
@@ -503,6 +578,9 @@ router.post(
 
       const movedAt = new Date();
       const itemIds = items.map((i) => i.id);
+      const unfoundSet = new Set(
+        items.filter((i) => i.statusEncontrado === "NAO").map((i) => i.id),
+      );
 
       const relocationData = itemIds.map((itemId) => ({
         itemId,
@@ -511,6 +589,7 @@ router.post(
         movedBy: user.sub,
         movedAt,
         pendingConfirm: true,
+        wasUnfound: unfoundSet.has(itemId),
       }));
 
       await prisma.$transaction([
@@ -540,12 +619,6 @@ router.post(
           })),
         }),
       ]);
-
-      await markSpaceStarted(prisma, {
-        inventoryId: req.inventoryId,
-        spaceId: sourceSpaceId,
-        user,
-      });
 
       // Build excludeClientId from inventoryId + userId + connectionId to exclude only this session
       const excludeClientId = connectionId
@@ -947,6 +1020,348 @@ router.post(
   },
 );
 
+router.post(
+  "/unfound-batch",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const {
+        spaceId,
+        patrimonioInicial,
+        patrimonioFinal,
+        dryRun,
+        connectionId,
+      } = req.body;
+      const user = req.user;
+
+      if (
+        !spaceId ||
+        patrimonioInicial === undefined ||
+        patrimonioFinal === undefined
+      ) {
+        return res.status(400).json({
+          error:
+            "spaceId, patrimonioInicial e patrimonioFinal são obrigatórios",
+        });
+      }
+
+      const startNumber = normalizePatrimonioNumber(patrimonioInicial);
+      const endNumber = normalizePatrimonioNumber(patrimonioFinal);
+
+      if (startNumber === null || endNumber === null) {
+        return res.status(400).json({
+          error: "Intervalo inválido: use números de patrimônio válidos",
+        });
+      }
+
+      const [rangeStart, rangeEnd] =
+        startNumber <= endNumber
+          ? [startNumber, endNumber]
+          : [endNumber, startNumber];
+
+      const space = await prisma.space.findFirst({
+        where: { id: spaceId, inventoryId: req.inventoryId },
+        select: { id: true },
+      });
+
+      if (!space) {
+        return res.status(404).json({ error: "Espaço não encontrado" });
+      }
+
+      const spaceItems = await prisma.item.findMany({
+        where: { inventoryId: req.inventoryId, spaceId },
+        select: { id: true, patrimonio: true },
+      });
+
+      const matchedItems = [];
+      const skippedPatrimonios = [];
+
+      for (const item of spaceItems) {
+        const numericValue = normalizePatrimonioNumber(item.patrimonio);
+        if (numericValue === null) {
+          skippedPatrimonios.push(item.patrimonio);
+          continue;
+        }
+        if (numericValue >= rangeStart && numericValue <= rangeEnd) {
+          matchedItems.push(item);
+        } else {
+          skippedPatrimonios.push(item.patrimonio);
+        }
+      }
+
+      if (dryRun) {
+        return res.json({
+          success: true,
+          dryRun: true,
+          updatedCount: 0,
+          matchedCount: matchedItems.length,
+          skippedCount: skippedPatrimonios.length,
+          skippedPatrimonios,
+        });
+      }
+
+      if (matchedItems.length === 0) {
+        return res.json({
+          success: true,
+          updatedCount: 0,
+          skippedCount: skippedPatrimonios.length,
+          skippedPatrimonios,
+        });
+      }
+
+      await markSpaceStarted(prisma, {
+        inventoryId: req.inventoryId,
+        spaceId,
+        user,
+      });
+
+      const timestamp = new Date();
+      const itemIds = matchedItems.map((item) => item.id);
+
+      await prisma.$transaction([
+        prisma.item.updateMany({
+          where: { id: { in: itemIds }, inventoryId: req.inventoryId },
+          data: {
+            statusEncontrado: "NAO",
+            lastKnownSpaceId: spaceId,
+            dataConferencia: timestamp,
+            ultimoConferente: user.sub,
+          },
+        }),
+        prisma.itemHistorico.createMany({
+          data: itemIds.map((itemId) => ({
+            itemId,
+            fromSpaceId: spaceId,
+            action: "NAO_LOCALIZADO",
+            createdBy: user.sub,
+            metadata: JSON.stringify({
+              batch: true,
+              patrimonioInicial,
+              patrimonioFinal,
+            }),
+            createdAt: timestamp,
+          })),
+        }),
+      ]);
+
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId,
+        action: "batch_unfound",
+        excludeClientId,
+        payload: {
+          spaceId,
+          action: "NAO_LOCALIZADO",
+          user: user.fullName || user.sub,
+          count: matchedItems.length,
+          timestamp: new Date(),
+        },
+      });
+
+      res.json({
+        success: true,
+        updatedCount: matchedItems.length,
+        skippedCount: skippedPatrimonios.length,
+        skippedPatrimonios,
+      });
+    } catch (err) {
+      console.error("Error marking items unfound in batch:", err);
+      res
+        .status(500)
+        .json({ error: "Erro ao marcar itens como não localizados em massa" });
+    }
+  },
+);
+
+router.post(
+  "/relocate-batch",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const {
+        spaceId,
+        targetSpaceId,
+        patrimonioInicial,
+        patrimonioFinal,
+        dryRun,
+        connectionId,
+      } = req.body;
+      const user = req.user;
+
+      if (
+        !spaceId ||
+        !targetSpaceId ||
+        patrimonioInicial === undefined ||
+        patrimonioFinal === undefined
+      ) {
+        return res.status(400).json({
+          error:
+            "spaceId, targetSpaceId, patrimonioInicial e patrimonioFinal são obrigatórios",
+        });
+      }
+
+      if (spaceId === targetSpaceId) {
+        return res.status(400).json({
+          error: "O espaço de destino deve ser diferente do espaço de origem",
+        });
+      }
+
+      const startNumber = normalizePatrimonioNumber(patrimonioInicial);
+      const endNumber = normalizePatrimonioNumber(patrimonioFinal);
+
+      if (startNumber === null || endNumber === null) {
+        return res.status(400).json({
+          error: "Intervalo inválido: use números de patrimônio válidos",
+        });
+      }
+
+      const [rangeStart, rangeEnd] =
+        startNumber <= endNumber
+          ? [startNumber, endNumber]
+          : [endNumber, startNumber];
+
+      const [space, targetSpace] = await Promise.all([
+        prisma.space.findFirst({
+          where: { id: spaceId, inventoryId: req.inventoryId },
+          select: { id: true },
+        }),
+        prisma.space.findFirst({
+          where: { id: targetSpaceId, inventoryId: req.inventoryId },
+          select: { id: true, name: true },
+        }),
+      ]);
+
+      if (!space) {
+        return res.status(404).json({ error: "Espaço não encontrado" });
+      }
+      if (!targetSpace) {
+        return res.status(400).json({ error: "Espaço de destino inválido" });
+      }
+
+      const spaceItems = await prisma.item.findMany({
+        where: { inventoryId: req.inventoryId, spaceId },
+        select: { id: true, patrimonio: true, statusEncontrado: true },
+      });
+
+      const matchedItems = [];
+      const skippedPatrimonios = [];
+
+      for (const item of spaceItems) {
+        const numericValue = normalizePatrimonioNumber(item.patrimonio);
+        if (numericValue === null) {
+          skippedPatrimonios.push(item.patrimonio);
+          continue;
+        }
+        if (numericValue >= rangeStart && numericValue <= rangeEnd) {
+          matchedItems.push(item);
+        } else {
+          skippedPatrimonios.push(item.patrimonio);
+        }
+      }
+
+      if (dryRun) {
+        return res.json({
+          success: true,
+          dryRun: true,
+          updatedCount: 0,
+          matchedCount: matchedItems.length,
+          skippedCount: skippedPatrimonios.length,
+          skippedPatrimonios,
+        });
+      }
+
+      if (matchedItems.length === 0) {
+        return res.json({
+          success: true,
+          updatedCount: 0,
+          skippedCount: skippedPatrimonios.length,
+          skippedPatrimonios,
+        });
+      }
+
+      const movedAt = new Date();
+      const itemIds = matchedItems.map((item) => item.id);
+
+      const relocationData = matchedItems.map((item) => ({
+        itemId: item.id,
+        fromSpaceId: spaceId,
+        toSpaceId: targetSpaceId,
+        movedBy: user.sub,
+        movedAt,
+        pendingConfirm: true,
+        wasUnfound: item.statusEncontrado === "NAO",
+      }));
+
+      await prisma.$transaction([
+        prisma.item.updateMany({
+          where: { id: { in: itemIds }, inventoryId: req.inventoryId },
+          data: {
+            spaceId: targetSpaceId,
+            lastKnownSpaceId: spaceId,
+            statusEncontrado: "PENDENTE",
+          },
+        }),
+        prisma.relocation.deleteMany({ where: { itemId: { in: itemIds } } }),
+        prisma.relocation.createMany({ data: relocationData }),
+        prisma.itemHistorico.createMany({
+          data: itemIds.map((itemId) => ({
+            itemId,
+            fromSpaceId: spaceId,
+            toSpaceId: targetSpaceId,
+            action: "REALOCADO",
+            createdBy: user.sub,
+            metadata: JSON.stringify({
+              batch: true,
+              patrimonioInicial,
+              patrimonioFinal,
+            }),
+            createdAt: movedAt,
+          })),
+        }),
+      ]);
+
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: targetSpaceId,
+        action: "batch_relocated",
+        excludeClientId,
+        payload: {
+          fromSpaceId: spaceId,
+          toSpaceId: targetSpaceId,
+          action: "REALOCADO",
+          user: user.fullName || user.sub,
+          count: matchedItems.length,
+          timestamp: movedAt,
+        },
+      });
+
+      res.json({
+        success: true,
+        updatedCount: matchedItems.length,
+        skippedCount: skippedPatrimonios.length,
+        skippedPatrimonios,
+      });
+    } catch (err) {
+      console.error("Error relocating items in batch:", err);
+      res.status(500).json({ error: "Erro ao mover itens em massa" });
+    }
+  },
+);
+
 // ========================================
 // REVISOR VERIFICATION ENDPOINT
 // ========================================
@@ -1027,38 +1442,71 @@ router.post(
           itemId: id,
           fromSpaceId: spaceId,
           toSpaceId: spaceId,
-          action: "NAOENLOCALIZADO_VERIFICACAO",
+          action: "NAO_LOCALIZADO_VERIFICACAO",
           createdBy: user.sub,
-          metadata: null,
+          metadata: JSON.stringify({ patrimonio: item.patrimonio }),
         });
 
-        const allResolved = await checkAllResolved();
+        // Auto-revert the space back to open — item failed verification
+        await prisma.space.update({
+          where: { id: spaceId },
+          data: { isFinalized: false, isVerifiedByRevisor: false },
+        });
+
+        // Clear REVERIFICAR from all remaining items in the space
+        await prisma.item.updateMany({
+          where: { spaceId, verificationStatus: "REVERIFICAR" },
+          data: { verificationStatus: null, verifiedAt: null, verifiedBy: null },
+        });
+
+        // Also clear the NAO_LOCALIZADO_VERIFICACAO mark so item is visible again for conferente
+        await prisma.item.update({
+          where: { id },
+          data: { verificationStatus: null },
+        });
+
+        // Close the verification roll as REVERTED
+        const activeRoll = await prisma.verificationRoll.findFirst({
+          where: { spaceId, result: "PENDING" },
+        });
+        if (activeRoll) {
+          await prisma.verificationRoll.update({
+            where: { id: activeRoll.id },
+            data: {
+              result: "REVERTED",
+              reason: `Item #${item.patrimonio} não localizado na reverificação`,
+              reviewedAt: timestamp,
+            },
+          });
+        }
+
+        // Record in finalization history
+        await prisma.finalizationHistory.create({
+          data: {
+            spaceId,
+            action: "REVERTED_ITEM_NOT_FOUND",
+            reason: `Item #${item.patrimonio} não localizado durante reverificação pelo revisor`,
+            actedBy: user.sub,
+          },
+        });
 
         broadcast({
           inventoryId: req.inventoryId,
           spaceId,
-          action: "verification_item_not_found",
+          action: "space_auto_reverted",
           payload: {
-            itemId: id,
-            patrimonio: item.patrimonio,
             spaceId,
+            patrimonio: item.patrimonio,
             user: user.fullName || user.sub,
-            allResolved,
+            reason: "item_not_found_verification",
           },
         });
 
         return res.json({
           success: true,
-          message:
-            "Item marcado como não localizado. Ficará em vermelho para o conferente.",
-          autoRevert: false,
-          allResolved,
-          item: {
-            id,
-            verificationStatus: "NAO_LOCALIZADO_VERIFICACAO",
-            verifiedAt: timestamp,
-            verifiedBy: user.sub,
-          },
+          autoReverted: true,
+          message: `Item #${item.patrimonio} não localizado — sala reaberta para conferência`,
+          item: { id, verificationStatus: null, verifiedAt: timestamp, verifiedBy: user.sub },
         });
       }
 

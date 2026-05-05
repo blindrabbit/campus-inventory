@@ -40,6 +40,16 @@ const HISTORY_ACTION_CONFIG = {
   },
 };
 
+// Utility function to normalize strings (remove accents)
+function normalizeString(str) {
+  if (!str) return "";
+  return str
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
 export default function RoomPage() {
   const params = useParams();
   const router = useRouter();
@@ -81,9 +91,29 @@ export default function RoomPage() {
   const [batchPreview, setBatchPreview] = useState(null);
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
+  const [batchAction, setBatchAction] = useState("confirm"); // "confirm" | "unfound" | "move"
+  const [batchTargetSpaceId, setBatchTargetSpaceId] = useState("");
+  const [batchSpaceSearch, setBatchSpaceSearch] = useState("");
+  const [batchSpaceDropdownOpen, setBatchSpaceDropdownOpen] = useState(false);
+
+  // Observações
+  const [observacoesText, setObservacoesText] = useState("");
+  const [observacoesSaving, setObservacoesSaving] = useState(false);
+  const [observacoesHasChanges, setObservacoesHasChanges] = useState(false);
+
+  // Multi-select state
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedItemIds, setSelectedItemIds] = useState(new Set());
+  const [multiMoveOpen, setMultiMoveOpen] = useState(false);
+  const [multiMoveSpaceSearch, setMultiMoveSpaceSearch] = useState("");
+  const [multiMoveSpaceDropdownOpen, setMultiMoveSpaceDropdownOpen] =
+    useState(false);
+  const [multiMoveTargetSpaceId, setMultiMoveTargetSpaceId] = useState("");
+  const longPressTimerRef = useRef(null);
   const [showFoundItems, setShowFoundItems] = useState(true);
   const [showRelocatedItems, setShowRelocatedItems] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState({});
+  const [itemSearchFilter, setItemSearchFilter] = useState("");
 
   // Verification workflow for reviewers
   const [verificationStatus, setVerificationStatus] = useState(null);
@@ -131,15 +161,27 @@ export default function RoomPage() {
         title: "✅ Conferência em massa",
         msg: `${lastEvent.data.user} conferiu ${lastEvent.data.count} itens nesta sala.`,
       },
+      batch_unfound: {
+        title: "Itens não localizados em massa",
+        msg: `${lastEvent.data.user} marcou ${lastEvent.data.count} itens como não localizados nesta sala.`,
+      },
+      batch_relocated: {
+        title: "📦 Itens movidos em massa",
+        msg: `${lastEvent.data.user} moveu ${lastEvent.data.count} itens para esta sala.`,
+      },
       item_restored: {
         title: "🔄 Item restaurado",
         msg: `${lastEvent.data.user} restaurou um item para esta sala.`,
+      },
+      space_auto_reverted: {
+        title: "⚠️ Sala reaberta pelo revisor",
+        msg: `Item #${lastEvent.data.patrimonio} não localizado — sala retornada para conferência.`,
       },
     };
 
     const c = config[lastEvent.type];
     if (c) {
-      showToast({ type: "info", title: c.title, message: c.msg });
+      showToast({ type: lastEvent.type === "space_auto_reverted" ? "warning" : "info", title: c.title, message: c.msg });
       if (loadDataRef.current) {
         loadDataRef.current(token, currentInventoryId);
       }
@@ -210,7 +252,17 @@ export default function RoomPage() {
   };
 
   const getSpaceStartBadge = (spaceData) => {
-    // Verificar primeiro se está finalizado
+    // Sala verificada e fechada definitivamente pelo revisor
+    if (spaceData?.isVerifiedByRevisor) {
+      const date = spaceData?.finalizedAt || spaceData?.startedAt;
+      const label = date ? new Date(date).toLocaleDateString("pt-BR") : "--/--/--";
+      return {
+        label: `🟣 Verificado pelo revisor em ${label}`,
+        className: "bg-purple-100 text-purple-800",
+      };
+    }
+
+    // Verificar se está finalizado pelo conferente
     if (spaceData?.isFinalized) {
       const date = spaceData?.finalizedAt || spaceData?.startedAt;
       const finalizedLabel = date
@@ -252,7 +304,7 @@ export default function RoomPage() {
       label: "🔴 Não iniciado",
       className: "bg-rose-100 text-rose-700",
     };
-  };;
+  };
 
   const getDirectionBadgeClass = (direction) => {
     if (direction === "ENTRADA") return "bg-emerald-100 text-emerald-700";
@@ -324,7 +376,7 @@ export default function RoomPage() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setRelocateSearchTerm(relocateSearchInput.trim().toLowerCase());
+      setRelocateSearchTerm(normalizeString(relocateSearchInput));
     }, 250);
     return () => clearTimeout(timer);
   }, [relocateSearchInput]);
@@ -334,11 +386,10 @@ export default function RoomPage() {
     const filtered = !relocateSearchTerm
       ? candidates
       : candidates.filter((candidate) => {
-          const name = candidate.name?.toLowerCase() || "";
-          const responsible =
-            candidate.responsibleDisplay?.toLowerCase() ||
-            candidate.responsible?.toLowerCase() ||
-            "";
+          const name = normalizeString(candidate.name || "");
+          const responsible = normalizeString(
+            candidate.responsibleDisplay || candidate.responsible || "",
+          );
           return (
             name.includes(relocateSearchTerm) ||
             responsible.includes(relocateSearchTerm)
@@ -380,9 +431,30 @@ export default function RoomPage() {
 
       if (!showFoundItems && item.statusEncontrado === "SIM") return false;
       if (!showRelocatedItems && item.meta?.isRelocated) return false;
+
+      // Apply text search filter
+      if (itemSearchFilter.trim()) {
+        const searchTerm = normalizeString(itemSearchFilter);
+        const patrimonio = normalizeString(item.patrimonio);
+        const descricao = normalizeString(item.descricao);
+
+        const matchesPatrimonio = patrimonio.includes(searchTerm);
+        const matchesDescricao = descricao.includes(searchTerm);
+
+        if (!matchesPatrimonio && !matchesDescricao) {
+          return false;
+        }
+      }
+
       return true;
     });
-  }, [items, showFoundItems, showRelocatedItems, verificationItems]);
+  }, [
+    items,
+    showFoundItems,
+    showRelocatedItems,
+    verificationItems,
+    itemSearchFilter,
+  ]);
 
   // Separa itens em grupos visuais (pilha) e itens avulsos
   // Escalonamento:
@@ -499,7 +571,10 @@ export default function RoomPage() {
       ]);
       setSpaces(spacesRes.data);
       setItems(itemsRes.data);
-      setSpace(spacesRes.data.find((s) => s.id === spaceId));
+      const currentSpace = spacesRes.data.find((s) => s.id === spaceId);
+      setSpace(currentSpace);
+      setObservacoesText(currentSpace?.observacoes || "");
+      setObservacoesHasChanges(false);
       setInventoryRole(roleRes.data.inventoryRole || null);
     } catch (err) {
       console.error("[Room Page] Error loading data:", err);
@@ -651,31 +726,30 @@ export default function RoomPage() {
               : i,
           ),
         );
+        // Remove from verificationItems so card turns green and buttons disappear
+        setVerificationItems((prev) => prev.filter((id) => id !== itemId));
+        // Update verification progress counter
+        setVerificationStatus((prev) =>
+          prev ? { ...prev, verified: (prev.verified || 0) + 1 } : prev,
+        );
         showToast({
           type: "success",
           title: "Item Verificado",
-          message: "Item re-verificado com sucesso.",
+          message: "Item confirmado na sala.",
         });
-      } else {
-        // Item not found during verification — stays in room, marked red
-        setItems((prev) =>
-          prev.map((i) =>
-            i.id === itemId
-              ? {
-                  ...i,
-                  verificationStatus: "NAO_LOCALIZADO_VERIFICACAO",
-                  verifiedAt: data.item?.verifiedAt,
-                  verifiedBy: data.item?.verifiedBy,
-                }
-              : i,
-          ),
-        );
+      } else if (data.autoReverted) {
+        // Backend auto-reverted the space — reload everything
         showToast({
           type: "warning",
-          title: "Item Não Localizado",
-          message:
-            "Item ficará destacado em vermelho para o conferente re-verificar.",
+          title: "Sala Reaberta",
+          message: data.message,
         });
+        const token2 = localStorage.getItem("token");
+        const inventoryId2 = localStorage.getItem("activeInventoryId");
+        setVerificationItems([]);
+        setVerificationStatus(null);
+        verificationInitiatedRef.current = false;
+        await loadData(token2, inventoryId2);
       }
     } catch (err) {
       showToast({
@@ -845,7 +919,6 @@ export default function RoomPage() {
         params: {
           inventoryId,
           q: query,
-          excludeSpaceId: spaceId,
         },
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -956,6 +1029,26 @@ export default function RoomPage() {
     setPendingMoveCandidate(candidate);
   };
 
+  const handleSearchResultAction = useCallback(
+    (candidate) => {
+      if (candidate.spaceId === spaceId) {
+        setSearchResults((prev) =>
+          prev.filter((item) => item.id !== candidate.id),
+        );
+        showToast({
+          type: "success",
+          title: "Item confirmado na sala",
+          message: "O item já estava nesta sala e foi confirmado.",
+        });
+        handleCheck(candidate.id, candidate.condicaoVisual || "EXCELENTE");
+        return;
+      }
+
+      handleMoveToCurrentRoom(candidate);
+    },
+    [handleCheck, spaceId],
+  );
+
   const handleUnfoundItem = () => {
     if (!pendingUnfoundItem) return;
 
@@ -989,6 +1082,166 @@ export default function RoomPage() {
     });
   };
 
+  const handleSaveObservacoes = async () => {
+    if (!observacoesHasChanges) return;
+    try {
+      setObservacoesSaving(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      await axios.patch(
+        `${API}/spaces/${spaceId}/observacoes`,
+        { observacoes: observacoesText, inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setObservacoesHasChanges(false);
+      showToast({
+        type: "success",
+        title: "Observações salvas",
+        message: "As observações da sala foram atualizadas.",
+      });
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Erro ao salvar",
+        message:
+          err.response?.data?.error || "Não foi possível salvar as observações.",
+      });
+    } finally {
+      setObservacoesSaving(false);
+    }
+  };
+
+  // ── Multi-select ──────────────────────────────────────────────────────────
+
+  const startLongPress = useCallback((itemId) => {
+    longPressTimerRef.current = setTimeout(() => {
+      if (navigator.vibrate) navigator.vibrate(40);
+      setSelectionMode(true);
+      setSelectedItemIds(new Set([itemId]));
+    }, 500);
+  }, []);
+
+  const cancelLongPress = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+
+  const toggleItemSelection = useCallback((itemId) => {
+    setSelectedItemIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(itemId)) {
+        next.delete(itemId);
+      } else {
+        next.add(itemId);
+      }
+      if (next.size === 0) setSelectionMode(false);
+      return next;
+    });
+  }, []);
+
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedItemIds(new Set());
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+
+  const handleMultiCheck = useCallback(() => {
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    const targets = items.filter(
+      (i) => selectedItemIds.has(i.id) && i.statusEncontrado !== "SIM",
+    );
+    targets.forEach((item) => {
+      enqueueAction({
+        endpoint: "/items/check",
+        method: "POST",
+        payload: {
+          itemId: item.id,
+          condicao: item.condicaoVisual || "EXCELENTE",
+          inventoryId,
+          connectionId,
+        },
+      });
+    });
+    setItems((prev) =>
+      prev.map((i) =>
+        selectedItemIds.has(i.id)
+          ? {
+              ...i,
+              statusEncontrado: "SIM",
+              condicaoVisual: i.condicaoVisual || "EXCELENTE",
+              meta: { ...i.meta, isRelocated: false },
+            }
+          : i,
+      ),
+    );
+    showToast({
+      type: "success",
+      title: "Itens marcados",
+      message: `${targets.length} item(ns) marcados como encontrados.`,
+    });
+    exitSelectionMode();
+  }, [items, selectedItemIds, exitSelectionMode, showToast]);
+
+  const handleMultiUnfound = useCallback(() => {
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    const targets = items.filter((i) => selectedItemIds.has(i.id));
+    targets.forEach((item) => {
+      enqueueAction({
+        endpoint: "/items/unfound",
+        method: "POST",
+        payload: { itemId: item.id, inventoryId },
+      });
+    });
+    setItems((prev) => prev.filter((i) => !selectedItemIds.has(i.id)));
+    showToast({
+      type: "info",
+      title: "Itens não localizados",
+      message: `${targets.length} item(ns) marcados como não localizados.`,
+    });
+    exitSelectionMode();
+  }, [items, selectedItemIds, exitSelectionMode, showToast]);
+
+  const handleMultiMove = useCallback(() => {
+    if (!multiMoveTargetSpaceId) return;
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    const targets = items.filter((i) => selectedItemIds.has(i.id));
+    targets.forEach((item) => {
+      enqueueAction({
+        endpoint: "/items/relocate",
+        method: "POST",
+        payload: {
+          itemId: item.id,
+          targetSpaceId: multiMoveTargetSpaceId,
+          inventoryId,
+          connectionId,
+        },
+      });
+    });
+    setItems((prev) => prev.filter((i) => !selectedItemIds.has(i.id)));
+    setMultiMoveOpen(false);
+    setMultiMoveSpaceSearch("");
+    setMultiMoveTargetSpaceId("");
+    showToast({
+      type: "success",
+      title: "Itens movidos",
+      message: `${targets.length} item(ns) enviados para a sala de destino.`,
+    });
+    exitSelectionMode();
+  }, [
+    items,
+    selectedItemIds,
+    multiMoveTargetSpaceId,
+    exitSelectionMode,
+    showToast,
+  ]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   const validateBatchFields = () => {
     const patrimonioInicial = batchStartPatrimonio.trim();
     const patrimonioFinal = batchEndPatrimonio.trim();
@@ -1011,6 +1264,15 @@ export default function RoomPage() {
       return null;
     }
 
+    if (batchAction === "move" && !batchTargetSpaceId) {
+      showToast({
+        type: "warning",
+        title: "Destino não selecionado",
+        message: "Selecione a sala de destino para mover os itens.",
+      });
+      return null;
+    }
+
     return { patrimonioInicial, patrimonioFinal };
   };
 
@@ -1024,21 +1286,27 @@ export default function RoomPage() {
       setBatchLoading(true);
       const token = localStorage.getItem("token");
       const inventoryId = localStorage.getItem("activeInventoryId");
-      const { data } = await axios.post(
-        `${API}/items/check-batch`,
-        {
-          inventoryId,
-          spaceId,
-          patrimonioInicial,
-          patrimonioFinal,
-          condicaoVisual: batchCondicao,
-          dryRun: true,
-          connectionId,
-        },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
+
+      const body = {
+        inventoryId,
+        spaceId,
+        patrimonioInicial,
+        patrimonioFinal,
+        dryRun: true,
+        connectionId,
+      };
+      if (batchAction === "confirm") body.condicaoVisual = batchCondicao;
+      if (batchAction === "move") body.targetSpaceId = batchTargetSpaceId;
+
+      const endpointMap = {
+        confirm: `${API}/items/check-batch`,
+        unfound: `${API}/items/unfound-batch`,
+        move: `${API}/items/relocate-batch`,
+      };
+
+      const { data } = await axios.post(endpointMap[batchAction], body, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
       setBatchPreview(data);
       if (!data?.matchedCount) {
@@ -1068,24 +1336,36 @@ export default function RoomPage() {
 
     const { patrimonioInicial, patrimonioFinal } = validated;
 
+    const endpointMap = {
+      confirm: `${API}/items/check-batch`,
+      unfound: `${API}/items/unfound-batch`,
+      move: `${API}/items/relocate-batch`,
+    };
+
+    const successMessageMap = {
+      confirm: (count) => `${count} item(ns) marcados como encontrados.`,
+      unfound: (count) => `${count} item(ns) marcados como não localizados.`,
+      move: (count) => `${count} item(ns) movidos para a sala de destino.`,
+    };
+
     try {
       setBatchLoading(true);
       const token = localStorage.getItem("token");
       const inventoryId = localStorage.getItem("activeInventoryId");
-      const { data } = await axios.post(
-        `${API}/items/check-batch`,
-        {
-          inventoryId,
-          spaceId,
-          patrimonioInicial,
-          patrimonioFinal,
-          condicaoVisual: batchCondicao,
-          connectionId,
-        },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
+
+      const body = {
+        inventoryId,
+        spaceId,
+        patrimonioInicial,
+        patrimonioFinal,
+        connectionId,
+      };
+      if (batchAction === "confirm") body.condicaoVisual = batchCondicao;
+      if (batchAction === "move") body.targetSpaceId = batchTargetSpaceId;
+
+      const { data } = await axios.post(endpointMap[batchAction], body, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
       await loadData(token, inventoryId);
 
@@ -1093,16 +1373,16 @@ export default function RoomPage() {
       setBatchConfirmOpen(false);
       showToast({
         type: "success",
-        title: "Conferência em massa aplicada",
-        message: `${data.updatedCount || 0} item(ns) marcados como encontrados.`,
+        title: "Operação em massa aplicada",
+        message: successMessageMap[batchAction](data.updatedCount || 0),
       });
     } catch (err) {
       showToast({
         type: "error",
-        title: "Falha na conferência em massa",
+        title: "Falha na operação em massa",
         message:
           err.response?.data?.error ||
-          "Não foi possível aplicar a marcação em massa.",
+          "Não foi possível aplicar a operação em massa.",
       });
     } finally {
       setBatchLoading(false);
@@ -1202,13 +1482,14 @@ export default function RoomPage() {
     }
   };
 
-  // True when every sampled item has been resolved (verified or not-found)
+  // True when every sampled item has been confirmed OK (no REVERIFICAR remaining)
+  // NAO_LOCALIZADO_VERIFICACAO causes auto-revert so it won't be present here
   const allVerificationItemsResolved = useMemo(() => {
-    if (!space?.isFinalized) return false;
+    if (!space?.isFinalized || space?.isVerifiedByRevisor) return false;
     if (!["REVISOR", "ADMIN_CICLO"].includes(inventoryRole)) return false;
-    if (!verificationItems || verificationItems.length === 0) return false;
+    if (!verificationStatus) return false; // no active verification roll
     return !items.some((i) => i.verificationStatus === "REVERIFICAR");
-  }, [space?.isFinalized, inventoryRole, verificationItems, items]);
+  }, [space?.isFinalized, space?.isVerifiedByRevisor, inventoryRole, verificationStatus, items]);
 
   if (loading) return <div className="p-8 text-center">Carregando...</div>;
   if (!space)
@@ -1225,30 +1506,35 @@ export default function RoomPage() {
         )
       : 0;
   const startBadge = getSpaceStartBadge(space);
-  const hasStateFilters = !showFoundItems || !showRelocatedItems;
+  const hasStateFilters =
+    !showFoundItems ||
+    !showRelocatedItems ||
+    itemSearchFilter.trim().length > 0;
 
   return (
     <div className="min-h-screen bg-gray-50 pb-20">
       {/* Header Fixo */}
       <header className="bg-white shadow-lg border-b sticky top-0 z-20">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          {/* <div className="mb-4">
-            <SpaceSearchBar placeholder="Buscar espaços por nome..." />
-          </div> */}
-          <div className="flex justify-between items-center mb-3">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">{space.name}</h1>
-              <p className="text-sm text-gray-500">
+        <div className="max-w-7xl mx-auto px-4 py-2 sm:py-4">
+          <div className="flex justify-between items-center mb-2 sm:mb-3">
+            <div className="min-w-0 flex-1 mr-3">
+              <h1
+                className="text-base font-bold text-gray-900 truncate sm:text-2xl"
+                title={space.name}
+              >
+                {space.name}
+              </h1>
+              <p className="hidden sm:block text-sm text-gray-500 mt-0.5">
                 Resp: {space.responsibleDisplay || space.responsible}
               </p>
-              <div className="mt-2 flex flex-col gap-1">
+              <div className="mt-1 sm:mt-2 flex flex-wrap gap-1">
                 <span
-                  className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${startBadge.className}`}
+                  className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold sm:px-2.5 sm:py-1 ${startBadge.className}`}
                 >
                   {startBadge.label}
                 </span>
                 {space.isVerified && space.confirmedBy && (
-                  <span className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold bg-purple-100 text-purple-800">
+                  <span className="hidden sm:inline-flex rounded-full px-2.5 py-1 text-xs font-semibold bg-purple-100 text-purple-800">
                     🟣 Confirmado em{" "}
                     {space.confirmedAt
                       ? new Date(space.confirmedAt).toLocaleDateString("pt-BR")
@@ -1260,15 +1546,15 @@ export default function RoomPage() {
             </div>
             <button
               onClick={() => router.push("/dashboard")}
-              className="text-gray-600 hover:text-gray-900"
+              className="shrink-0 text-gray-600 hover:text-gray-900 text-sm sm:text-base"
             >
               ← Voltar
             </button>
           </div>
 
-          <div className="w-full bg-gray-200 rounded-full h-2.5 mb-1">
+          <div className="w-full bg-gray-200 rounded-full h-2 sm:h-2.5 mb-1">
             <div
-              className="bg-green-600 h-2.5 rounded-full transition-all"
+              className="bg-green-600 h-full rounded-full transition-all"
               style={{ width: `${progress}%` }}
             ></div>
           </div>
@@ -1306,12 +1592,116 @@ export default function RoomPage() {
           >
             Histórico de atualizações
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("observacoes")}
+            className={`px-4 py-2 rounded-lg text-sm font-medium relative ${
+              activeTab === "observacoes"
+                ? "bg-sky-600 text-white"
+                : "text-slate-700 hover:bg-slate-100"
+            }`}
+          >
+            Observações
+            {observacoesHasChanges && (
+              <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-amber-400" />
+            )}
+          </button>
         </div>
 
-        {activeTab === "historico" ? (
+        {activeTab === "observacoes" ? (
+          <div className="bg-white rounded-xl shadow p-5 space-y-4">
+            <div>
+              <h3 className="font-semibold text-gray-900 mb-1">
+                Observações da sala
+              </h3>
+              <p className="text-sm text-gray-500">
+                Registre informações relevantes sobre este espaço — detalhes de
+                acesso, pendências, particularidades ou qualquer nota útil para
+                a equipe.
+              </p>
+            </div>
+
+            <textarea
+              value={observacoesText}
+              onChange={(e) => {
+                setObservacoesText(e.target.value);
+                setObservacoesHasChanges(true);
+              }}
+              placeholder="Digite aqui as observações sobre esta sala..."
+              rows={8}
+              className="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm text-gray-800 placeholder-gray-400 resize-y focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent"
+            />
+
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-slate-400">
+                {observacoesText.length > 0
+                  ? `${observacoesText.length} caractere${observacoesText.length !== 1 ? "s" : ""}`
+                  : "Nenhuma observação registrada"}
+              </p>
+              <button
+                onClick={handleSaveObservacoes}
+                disabled={!observacoesHasChanges || observacoesSaving}
+                className="px-5 py-2 bg-sky-600 text-white rounded-xl text-sm font-semibold hover:bg-sky-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              >
+                {observacoesSaving ? "Salvando..." : "Salvar observações"}
+              </button>
+            </div>
+          </div>
+        ) : activeTab === "historico" ? (
           <>
             <div className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-200">
-              <table className="min-w-full divide-y divide-slate-200">
+              {/* Mobile: card list */}
+              <div className="sm:hidden">
+                {movementLoading ? (
+                  <p className="px-4 py-10 text-center text-sm text-slate-500">
+                    Carregando atualizações...
+                  </p>
+                ) : movementHistory.length === 0 ? (
+                  <p className="px-4 py-10 text-center text-sm text-slate-500">
+                    Nenhuma atualização encontrada para esta sala.
+                  </p>
+                ) : (
+                  <ul className="divide-y divide-slate-100">
+                    {movementHistory.map((entry) => (
+                      <li key={entry.id} className="px-4 py-3 space-y-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${getActionBadgeClass(entry.action)}`}
+                          >
+                            {getActionLabel(entry.action)}
+                          </span>
+                          <span
+                            className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${getDirectionBadgeClass(entry.direction)}`}
+                          >
+                            {entry.direction}
+                          </span>
+                        </div>
+                        <p className="text-sm font-semibold text-slate-900 leading-snug">
+                          #{entry.patrimonio}
+                          {entry.descricao && (
+                            <span className="font-normal text-slate-600">
+                              {" "}— {entry.descricao}
+                            </span>
+                          )}
+                        </p>
+                        {(entry.fromSpaceName || entry.toSpaceName) && (
+                          <p className="text-xs text-slate-500">
+                            {entry.fromSpaceName || "-"} →{" "}
+                            {entry.toSpaceName || "-"}
+                          </p>
+                        )}
+                        <p className="text-xs text-slate-400">
+                          {entry.createdBy || "-"} •{" "}
+                          {formatMovementDate(entry.createdAt)}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              {/* Desktop: table */}
+              <table className="hidden sm:table min-w-full divide-y divide-slate-200">
                 <thead className="bg-slate-50">
                   <tr className="text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                     <th className="px-6 py-4">Nº Patrimônio</th>
@@ -1465,6 +1855,15 @@ export default function RoomPage() {
 
             {quickActionMode === "single" ? (
               <div className="mt-4 space-y-3">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-sm font-semibold text-slate-800">
+                    Busca geral do inventário
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Localiza patrimônios em qualquer sala. Os itens que já estão
+                    aqui aparecem com uma cor diferente.
+                  </p>
+                </div>
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -1478,7 +1877,7 @@ export default function RoomPage() {
                     disabled={searching}
                     className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-black disabled:opacity-50"
                   >
-                    {searching ? "Buscando..." : "Buscar item"}
+                    {searching ? "Buscando..." : "Buscar no inventário"}
                   </button>
                 </div>
 
@@ -1491,7 +1890,11 @@ export default function RoomPage() {
                     {searchResults.map((candidate) => (
                       <li
                         key={candidate.id}
-                        className="p-3 flex items-start justify-between gap-3"
+                        className={`p-3 flex items-start justify-between gap-3 border-l-4 ${
+                          candidate.spaceId === spaceId
+                            ? "bg-sky-50 border-sky-400"
+                            : "bg-amber-50 border-amber-400"
+                        }`}
                       >
                         <div>
                           <p className="font-semibold text-sm">
@@ -1501,15 +1904,23 @@ export default function RoomPage() {
                             {candidate.descricao}
                           </p>
                           <p className="text-xs text-gray-500">
-                            Origem: {candidate.spaceName}
+                            {candidate.spaceId === spaceId
+                              ? `Já está nesta sala${candidate.spaceName ? ` • ${candidate.spaceName}` : ""}`
+                              : `Origem: ${candidate.spaceName || "Sala não informada"}`}
                           </p>
                         </div>
                         <button
-                          onClick={() => handleMoveToCurrentRoom(candidate)}
+                          onClick={() => handleSearchResultAction(candidate)}
                           disabled={saving}
-                          className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+                          className={`px-3 py-1.5 text-white rounded-lg text-sm disabled:opacity-50 ${
+                            candidate.spaceId === spaceId
+                              ? "bg-emerald-600 hover:bg-emerald-700"
+                              : "bg-blue-600 hover:bg-blue-700"
+                          }`}
                         >
-                          Mover para esta sala
+                          {candidate.spaceId === spaceId
+                            ? "Confirmar na sala"
+                            : "Mover para esta sala"}
                         </button>
                       </li>
                     ))}
@@ -1518,7 +1929,36 @@ export default function RoomPage() {
               </div>
             ) : (
               <div className="mt-4 space-y-3">
-                <div className="grid gap-3 md:grid-cols-4">
+                {/* Seletor de tipo de operação em lote */}
+                <div className="inline-flex rounded-lg bg-slate-100 p-1 gap-1">
+                  {[
+                    { key: "confirm", label: "Confirmar" },
+                    { key: "unfound", label: "Não Localizado" },
+                    { key: "move", label: "Mover" },
+                  ].map(({ key, label }) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => {
+                        setBatchAction(key);
+                        setBatchPreview(null);
+                        setBatchSpaceSearch("");
+                        setBatchTargetSpaceId("");
+                      }}
+                      className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                        batchAction === key
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <div
+                  className={`grid gap-3 ${batchAction === "unfound" ? "md:grid-cols-3" : "md:grid-cols-4"}`}
+                >
                   <input
                     type="text"
                     value={batchStartPatrimonio}
@@ -1533,15 +1973,91 @@ export default function RoomPage() {
                     placeholder="Patrimônio final"
                     className="border rounded-lg px-3 py-2"
                   />
-                  <select
-                    value={batchCondicao}
-                    onChange={(e) => setBatchCondicao(e.target.value)}
-                    className="border rounded-lg px-3 py-2"
-                  >
-                    <option value="EXCELENTE">🟢 Ótimo</option>
-                    <option value="BOM">🟡 Regular</option>
-                    <option value="INSERVIVEL">🔴 Ruim</option>
-                  </select>
+                  {batchAction === "confirm" && (
+                    <select
+                      value={batchCondicao}
+                      onChange={(e) => setBatchCondicao(e.target.value)}
+                      className="border rounded-lg px-3 py-2"
+                    >
+                      <option value="EXCELENTE">🟢 Ótimo</option>
+                      <option value="BOM">🟡 Regular</option>
+                      <option value="INSERVIVEL">🔴 Ruim</option>
+                    </select>
+                  )}
+                  {batchAction === "move" && (
+                    <div className="relative">
+                      <input
+                        type="text"
+                        placeholder="Buscar sala de destino..."
+                        value={batchSpaceSearch}
+                        onFocus={() => setBatchSpaceDropdownOpen(true)}
+                        onBlur={() =>
+                          setTimeout(
+                            () => setBatchSpaceDropdownOpen(false),
+                            150,
+                          )
+                        }
+                        onChange={(e) => {
+                          setBatchSpaceSearch(e.target.value);
+                          setBatchTargetSpaceId("");
+                          setBatchPreview(null);
+                          setBatchSpaceDropdownOpen(true);
+                        }}
+                        className={`w-full border rounded-lg px-3 py-2 text-sm ${
+                          batchTargetSpaceId
+                            ? "border-blue-400 bg-blue-50"
+                            : "border-slate-300"
+                        }`}
+                      />
+                      {batchSpaceDropdownOpen && (
+                        <div className="absolute z-20 w-full bg-white border border-slate-200 rounded-lg shadow-lg mt-1 max-h-52 overflow-auto">
+                          {spaces
+                            .filter((s) => s.id !== spaceId)
+                            .filter(
+                              (s) =>
+                                batchSpaceSearch === "" ||
+                                s.name
+                                  .toLowerCase()
+                                  .includes(batchSpaceSearch.toLowerCase()),
+                            )
+                            .map((s) => (
+                              <button
+                                key={s.id}
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => {
+                                  setBatchTargetSpaceId(s.id);
+                                  setBatchSpaceSearch(s.name);
+                                  setBatchSpaceDropdownOpen(false);
+                                  setBatchPreview(null);
+                                }}
+                                className={`w-full text-left px-3 py-2.5 text-sm border-b border-slate-100 last:border-0 hover:bg-slate-50 ${
+                                  batchTargetSpaceId === s.id
+                                    ? "bg-blue-50 text-blue-700 font-medium"
+                                    : ""
+                                }`}
+                              >
+                                {s.name}
+                              </button>
+                            ))}
+                          {spaces
+                            .filter((s) => s.id !== spaceId)
+                            .filter(
+                              (s) =>
+                                batchSpaceSearch !== "" &&
+                                !s.name
+                                  .toLowerCase()
+                                  .includes(batchSpaceSearch.toLowerCase()),
+                            ).length ===
+                            spaces.filter((s) => s.id !== spaceId).length && (
+                            <p className="px-3 py-2.5 text-sm text-slate-400">
+                              Nenhuma sala encontrada
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={handleBatchPreview}
@@ -1569,9 +2085,19 @@ export default function RoomPage() {
                           batchLoading || (batchPreview.matchedCount || 0) === 0
                         }
                         onClick={() => setBatchConfirmOpen(true)}
-                        className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+                        className={`px-4 py-2 text-white rounded-lg disabled:opacity-50 ${
+                          batchAction === "unfound"
+                            ? "bg-red-600 hover:bg-red-700"
+                            : batchAction === "move"
+                              ? "bg-blue-600 hover:bg-blue-700"
+                              : "bg-emerald-600 hover:bg-emerald-700"
+                        }`}
                       >
-                        Confirmar marcação em massa
+                        {batchAction === "confirm" &&
+                          "Confirmar marcação em massa"}
+                        {batchAction === "unfound" &&
+                          "Marcar como não localizado em massa"}
+                        {batchAction === "move" && "Mover em massa"}
                       </button>
                     </div>
                   </div>
@@ -1584,15 +2110,21 @@ export default function RoomPage() {
         {activeTab === "itens" ? (
           <div className="bg-white rounded-xl shadow p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-slate-800">
-                Filtros de estado dos itens
-              </p>
-              <div className="flex flex-wrap items-center gap-4">
+              <div>
+                <p className="text-sm font-semibold text-slate-800">
+                  Filtro da sala
+                </p>
+                <p className="text-xs text-slate-500">
+                  Esse campo não busca em outras salas. Ele só reduz o que já
+                  está sendo exibido aqui.
+                </p>
+              </div>
+              <div className="flex flex-nowrap items-center gap-2 md:gap-4 overflow-x-auto">
                 <button
                   type="button"
                   onClick={() => setShowFoundItems((prev) => !prev)}
                   aria-pressed={showFoundItems}
-                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium transition ${
+                  className={`inline-flex items-center gap-0.5 md:gap-2 rounded-full border px-1.5 md:px-3 py-0.5 md:py-1.5 text-xs md:text-sm font-medium transition whitespace-nowrap flex-shrink-0 ${
                     showFoundItems
                       ? "border-emerald-300 bg-emerald-50 text-emerald-700"
                       : "border-slate-300 bg-slate-100 text-slate-500"
@@ -1601,7 +2133,7 @@ export default function RoomPage() {
                   <span>{showFoundItems ? "✓" : "○"}</span>
                   <span>Encontrados</span>
                   <span
-                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                    className={`rounded-full px-1 md:px-2 py-0.5 text-xs font-semibold ${
                       showFoundItems
                         ? "bg-emerald-200 text-emerald-800"
                         : "bg-slate-200 text-slate-600"
@@ -1614,7 +2146,7 @@ export default function RoomPage() {
                   type="button"
                   onClick={() => setShowRelocatedItems((prev) => !prev)}
                   aria-pressed={showRelocatedItems}
-                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm font-medium transition ${
+                  className={`inline-flex items-center gap-0.5 md:gap-2 rounded-full border px-1.5 md:px-3 py-0.5 md:py-1.5 text-xs md:text-sm font-medium transition whitespace-nowrap flex-shrink-0 ${
                     showRelocatedItems
                       ? "border-amber-300 bg-amber-50 text-amber-700"
                       : "border-slate-300 bg-slate-100 text-slate-500"
@@ -1623,7 +2155,7 @@ export default function RoomPage() {
                   <span>{showRelocatedItems ? "✓" : "○"}</span>
                   <span>Movidos</span>
                   <span
-                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                    className={`rounded-full px-1 md:px-2 py-0.5 text-xs font-semibold ${
                       showRelocatedItems
                         ? "bg-amber-200 text-amber-800"
                         : "bg-slate-200 text-slate-600"
@@ -1633,6 +2165,34 @@ export default function RoomPage() {
                   </span>
                 </button>
               </div>
+            </div>
+
+            {/* Search filter for patrimonio and description */}
+            <div className="mt-4 flex flex-col gap-3">
+              <input
+                type="text"
+                value={itemSearchFilter}
+                onChange={(e) => setItemSearchFilter(e.target.value)}
+                placeholder="Filtrar apenas os itens visíveis nesta sala..."
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+
+              {/* Show "Select all filtered" button when in multi-select mode and there are filtered items */}
+              {selectionMode && filteredItems.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const allFilteredIds = new Set(
+                      filteredItems.map((item) => item.id),
+                    );
+                    setSelectedItemIds(allFilteredIds);
+                  }}
+                  className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition"
+                >
+                  ✓ Selecionar {filteredItems.length} filtrado
+                  {filteredItems.length !== 1 ? "s" : ""}
+                </button>
+              )}
             </div>
           </div>
         ) : null}
@@ -1836,7 +2396,27 @@ export default function RoomPage() {
                           return (
                             <div
                               key={item.id}
-                              className={`bg-gray-50 rounded-lg border-l-4 transition-all ${
+                              onTouchStart={() =>
+                                !selectionMode && startLongPress(item.id)
+                              }
+                              onTouchEnd={cancelLongPress}
+                              onTouchMove={cancelLongPress}
+                              onTouchCancel={cancelLongPress}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                if (!selectionMode) {
+                                  setSelectionMode(true);
+                                  setSelectedItemIds(new Set([item.id]));
+                                }
+                              }}
+                              onClick={() =>
+                                selectionMode && toggleItemSelection(item.id)
+                              }
+                              className={`relative rounded-lg border-l-4 transition-all select-none ${
+                                selectionMode && selectedItemIds.has(item.id)
+                                  ? "ring-2 ring-blue-500 ring-offset-1"
+                                  : ""
+                              } ${
                                 item.verificationStatus ===
                                 "NAO_LOCALIZADO_VERIFICACAO"
                                   ? "border-red-500 bg-red-50"
@@ -1846,21 +2426,36 @@ export default function RoomPage() {
                                     : item.meta?.isRelocated
                                       ? "border-yellow-500 bg-yellow-50"
                                       : item.statusEncontrado === "SIM"
-                                        ? "border-green-500"
-                                        : "border-gray-300"
+                                        ? "border-green-500 bg-green-50"
+                                        : "border-gray-300 bg-gray-50"
                               }`}
                             >
+                              {selectionMode && (
+                                <div className="absolute top-2 right-2 z-10 pointer-events-none">
+                                  <div
+                                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center text-xs font-bold ${
+                                      selectedItemIds.has(item.id)
+                                        ? "bg-blue-600 border-blue-600 text-white"
+                                        : "border-slate-400 bg-white"
+                                    }`}
+                                  >
+                                    {selectedItemIds.has(item.id) && "✓"}
+                                  </div>
+                                </div>
+                              )}
                               <div className="p-4">
                                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                   <div
                                     className="flex-1 cursor-pointer"
-                                    onClick={() =>
+                                    onClick={(e) => {
+                                      if (selectionMode) return;
+                                      e.stopPropagation();
                                       setExpandedItem(
                                         expandedItem === item.id
                                           ? null
                                           : item.id,
-                                      )
-                                    }
+                                      );
+                                    }}
                                   >
                                     <div className="flex items-center gap-2 mb-1">
                                       <span className="font-bold text-base">
@@ -1872,11 +2467,18 @@ export default function RoomPage() {
                                           ⚠️ Não localizado na verificação
                                         </span>
                                       )}
-                                      {item.meta?.isRelocated && (
-                                        <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
-                                          ⚠️ Movido de {item.meta.fromSpaceName}
-                                        </span>
-                                      )}
+                                      {item.meta?.isRelocated &&
+                                        (item.meta?.wasUnfound ? (
+                                          <span className="px-2 py-0.5 bg-orange-200 text-orange-800 text-xs rounded font-medium">
+                                            🔍 Não localizado em{" "}
+                                            {item.meta.fromSpaceName}
+                                          </span>
+                                        ) : (
+                                          <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
+                                            ⚠️ Movido de{" "}
+                                            {item.meta.fromSpaceName}
+                                          </span>
+                                        ))}
                                       {item.statusEncontrado === "SIM" &&
                                         !item.verificationStatus && (
                                           <span className="text-green-600 text-sm">
@@ -1889,52 +2491,111 @@ export default function RoomPage() {
                                     </p>
                                   </div>
 
-                                  <div className="flex flex-wrap gap-2 lg:justify-end">
-                                    {item.statusEncontrado === "SIM" ||
-                                    item.verificationStatus ===
-                                      "REVERIFICAR" ||
-                                    verificationItems?.includes(
-                                      item.id,
-                                    ) ? null : item.verificationStatus ===
-                                      "NAO_LOCALIZADO_VERIFICACAO" ? (
-                                      <span className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-medium">
-                                        ⚠️ Aguardando conferente
-                                      </span>
-                                    ) : (
-                                      <>
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            handleCheck(
-                                              item.id,
-                                              item.condicaoVisual ||
-                                                "EXCELENTE",
-                                            );
-                                          }}
-                                          className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700"
-                                        >
-                                          ✅ Encontrado
-                                        </button>
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            setRelocateModal(item);
-                                          }}
-                                          className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700"
-                                        >
-                                          ➡️ Mover
-                                        </button>
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            setPendingUnfoundItem(item);
-                                          }}
-                                          className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs hover:bg-red-200"
-                                        >
-                                          🚫 Não localizado
-                                        </button>
-                                      </>
-                                    )}
+                                  <div className="flex justify-between gap-2 md:gap-4 w-full mt-3">
+                                    {!selectionMode &&
+                                      (item.verificationStatus ===
+                                      "REVERIFICAR"
+                                        ? ["REVISOR", "ADMIN_CICLO"].includes(
+                                            inventoryRole,
+                                          )
+                                          ? (
+                                            <>
+                                              <button
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  handleVerifyCheck(
+                                                    item.id,
+                                                    "SIM",
+                                                  );
+                                                }}
+                                                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-purple-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-purple-700 transition"
+                                              >
+                                                <span className="hidden md:inline">
+                                                  ✅ Está aqui
+                                                </span>
+                                                <span className="md:hidden">
+                                                  ✅ Aqui
+                                                </span>
+                                              </button>
+                                              <button
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  handleVerifyCheck(
+                                                    item.id,
+                                                    "NAO",
+                                                  );
+                                                }}
+                                                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition"
+                                              >
+                                                <span className="hidden md:inline">
+                                                  ❌ Não está aqui
+                                                </span>
+                                                <span className="md:hidden">
+                                                  ❌ N.Aqui
+                                                </span>
+                                              </button>
+                                            </>
+                                          )
+                                          : null
+                                        : item.statusEncontrado === "SIM"
+                                          ? null
+                                          : item.verificationStatus ===
+                                              "NAO_LOCALIZADO_VERIFICACAO"
+                                            ? (
+                                              <span className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-medium">
+                                                ⚠️ Aguardando conferente
+                                              </span>
+                                            )
+                                            : (
+                                              <>
+                                                <button
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    handleCheck(
+                                                      item.id,
+                                                      item.condicaoVisual ||
+                                                        "EXCELENTE",
+                                                    );
+                                                  }}
+                                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-green-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-green-700 transition"
+                                                >
+                                                  <span className="hidden md:inline">
+                                                    ✅ Encontrado
+                                                  </span>
+                                                  <span className="md:hidden">
+                                                    ✅ Enc.
+                                                  </span>
+                                                </button>
+                                                <button
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setRelocateModal(item);
+                                                  }}
+                                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 transition"
+                                                >
+                                                  <span className="hidden md:inline">
+                                                    ➡️ Mover
+                                                  </span>
+                                                  <span className="md:hidden">
+                                                    ➡️ Mov.
+                                                  </span>
+                                                </button>
+                                                <button
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setPendingUnfoundItem(item);
+                                                  }}
+                                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition"
+                                                >
+                                                  <span className="hidden md:inline">
+                                                    🚫 Não localizado
+                                                  </span>
+                                                  <span className="md:hidden">
+                                                    🚫 N.Loc
+                                                  </span>
+                                                </button>
+                                              </>
+                                            ))}
                                   </div>
                                 </div>
                               </div>
@@ -2044,7 +2705,23 @@ export default function RoomPage() {
             return (
               <div
                 key={item.id}
-                className={`bg-white rounded-xl shadow border-l-4 transition-all ${
+                onTouchStart={() => !selectionMode && startLongPress(item.id)}
+                onTouchEnd={cancelLongPress}
+                onTouchMove={cancelLongPress}
+                onTouchCancel={cancelLongPress}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (!selectionMode) {
+                    setSelectionMode(true);
+                    setSelectedItemIds(new Set([item.id]));
+                  }
+                }}
+                onClick={() => selectionMode && toggleItemSelection(item.id)}
+                className={`relative rounded-xl shadow border-l-4 transition-all select-none ${
+                  selectionMode && selectedItemIds.has(item.id)
+                    ? "ring-2 ring-blue-500 ring-offset-1"
+                    : ""
+                } ${
                   item.verificationStatus === "NAO_LOCALIZADO_VERIFICACAO"
                     ? "border-red-500 bg-red-50"
                     : item.verificationStatus === "REVERIFICAR" ||
@@ -2053,20 +2730,35 @@ export default function RoomPage() {
                       : item.meta?.isRelocated
                         ? "border-yellow-500 bg-yellow-50"
                         : item.statusEncontrado === "SIM"
-                          ? "border-green-500"
-                          : "border-gray-300"
+                          ? "border-green-500 bg-green-50"
+                          : "border-gray-300 bg-white"
                 }`}
               >
+                {selectionMode && (
+                  <div className="absolute top-3 right-3 z-10 pointer-events-none">
+                    <div
+                      className={`w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold ${
+                        selectedItemIds.has(item.id)
+                          ? "bg-blue-600 border-blue-600 text-white"
+                          : "border-slate-400 bg-white"
+                      }`}
+                    >
+                      {selectedItemIds.has(item.id) && "✓"}
+                    </div>
+                  </div>
+                )}
                 {/* Card Colapsado */}
                 <div className="p-5">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div
                       className="flex-1 cursor-pointer"
-                      onClick={() =>
+                      onClick={(e) => {
+                        if (selectionMode) return;
+                        e.stopPropagation();
                         setExpandedItem(
                           expandedItem === item.id ? null : item.id,
-                        )
-                      }
+                        );
+                      }}
                     >
                       <div className="flex items-center gap-2 mb-1">
                         <span className="font-bold text-lg">
@@ -2078,11 +2770,16 @@ export default function RoomPage() {
                             ⚠️ Não localizado na verificação
                           </span>
                         )}
-                        {item.meta?.isRelocated && (
-                          <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
-                            ⚠️ Movido de {item.meta.fromSpaceName}
-                          </span>
-                        )}
+                        {item.meta?.isRelocated &&
+                          (item.meta?.wasUnfound ? (
+                            <span className="px-2 py-0.5 bg-orange-200 text-orange-800 text-xs rounded font-medium">
+                              🔍 Não localizado em {item.meta.fromSpaceName}
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
+                              ⚠️ Movido de {item.meta.fromSpaceName}
+                            </span>
+                          ))}
                         {item.statusEncontrado === "SIM" &&
                           !item.verificationStatus && (
                             <span className="text-green-600 text-sm">✓</span>
@@ -2093,48 +2790,91 @@ export default function RoomPage() {
                       </p>
                     </div>
 
-                    <div className="flex flex-wrap gap-2 lg:justify-end">
-                      {item.statusEncontrado === "SIM" ||
-                      item.verificationStatus === "REVERIFICAR" ||
-                      verificationItems?.includes(item.id) ? null : item.verificationStatus ===
-                        "NAO_LOCALIZADO_VERIFICACAO" ? (
-                        <span className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-medium">
-                          ⚠️ Aguardando conferente
-                        </span>
-                      ) : (
-                        <>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleCheck(
-                                item.id,
-                                item.condicaoVisual || "EXCELENTE",
-                              );
-                            }}
-                            className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700"
-                          >
-                            ✅ Encontrado
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setRelocateModal(item);
-                            }}
-                            className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
-                          >
-                            ➡️ Mover
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setPendingUnfoundItem(item);
-                            }}
-                            className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-sm hover:bg-red-200"
-                          >
-                            🚫 Não localizado
-                          </button>
-                        </>
-                      )}
+                    <div className="flex justify-between gap-2 md:gap-4 w-full mt-3">
+                      {!selectionMode &&
+                        (item.verificationStatus === "REVERIFICAR"
+                          ? ["REVISOR", "ADMIN_CICLO"].includes(inventoryRole)
+                            ? (
+                              <>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleVerifyCheck(item.id, "SIM");
+                                  }}
+                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-purple-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-purple-700 transition"
+                                >
+                                  <span className="hidden md:inline">
+                                    ✅ Está aqui
+                                  </span>
+                                  <span className="md:hidden">✅ Aqui</span>
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleVerifyCheck(item.id, "NAO");
+                                  }}
+                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition"
+                                >
+                                  <span className="hidden md:inline">
+                                    ❌ Não está aqui
+                                  </span>
+                                  <span className="md:hidden">❌ N.Aqui</span>
+                                </button>
+                              </>
+                            )
+                            : null
+                          : item.statusEncontrado === "SIM"
+                            ? null
+                            : item.verificationStatus ===
+                                "NAO_LOCALIZADO_VERIFICACAO"
+                              ? (
+                                <span className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-medium">
+                                  ⚠️ Aguardando conferente
+                                </span>
+                              )
+                              : (
+                                <>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleCheck(
+                                        item.id,
+                                        item.condicaoVisual || "EXCELENTE",
+                                      );
+                                    }}
+                                    className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-green-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-green-700 transition"
+                                  >
+                                    <span className="hidden md:inline">
+                                      ✅ Encontrado
+                                    </span>
+                                    <span className="md:hidden">✅ Enc.</span>
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setRelocateModal(item);
+                                    }}
+                                    className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 transition"
+                                  >
+                                    <span className="hidden md:inline">
+                                      ➡️ Mover
+                                    </span>
+                                    <span className="md:hidden">➡️ Mov.</span>
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setPendingUnfoundItem(item);
+                                    }}
+                                    className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition"
+                                  >
+                                    <span className="hidden md:inline">
+                                      🚫 Não localizado
+                                    </span>
+                                    <span className="md:hidden">🚫 N.Loc</span>
+                                  </button>
+                                </>
+                              ))}
                     </div>
                   </div>
                 </div>
@@ -2240,9 +2980,9 @@ export default function RoomPage() {
                 <button
                   onClick={handleCompleteVerification}
                   disabled={saving}
-                  className="px-6 py-3 bg-emerald-600 text-white rounded-xl font-semibold hover:bg-emerald-700 shadow-lg disabled:opacity-50"
+                  className="px-6 py-3 bg-purple-600 text-white rounded-xl font-semibold hover:bg-purple-700 shadow-lg disabled:opacity-50"
                 >
-                  ✅ Finalizar Sala
+                  🟣 Fechar Definitivamente
                 </button>
               )}
               {!space?.isFinalized && inventoryRole !== "VISUALIZADOR" && (
@@ -2458,11 +3198,29 @@ export default function RoomPage() {
         isOpen={batchConfirmOpen}
         onConfirm={handleBatchConfirm}
         onCancel={() => setBatchConfirmOpen(false)}
-        title="Confirmar encontrado em massa"
-        message={`Aplicar status de encontrado para ${batchPreview?.matchedCount || 0} item(ns) no intervalo informado?`}
-        confirmText="Aplicar em massa"
+        title={
+          batchAction === "confirm"
+            ? "Confirmar encontrado em massa"
+            : batchAction === "unfound"
+              ? "Marcar não localizado em massa"
+              : "Mover itens em massa"
+        }
+        message={
+          batchAction === "confirm"
+            ? `Aplicar status de encontrado para ${batchPreview?.matchedCount || 0} item(ns) no intervalo informado?`
+            : batchAction === "unfound"
+              ? `Marcar ${batchPreview?.matchedCount || 0} item(ns) como não localizado no intervalo informado?`
+              : `Mover ${batchPreview?.matchedCount || 0} item(ns) para a sala de destino selecionada?`
+        }
+        confirmText={
+          batchAction === "confirm"
+            ? "Aplicar em massa"
+            : batchAction === "unfound"
+              ? "Marcar não localizado"
+              : "Mover em massa"
+        }
         cancelText="Cancelar"
-        variant="warning"
+        variant={batchAction === "unfound" ? "danger" : "warning"}
       />
 
       <ConfirmModal
@@ -2475,6 +3233,154 @@ export default function RoomPage() {
         cancelText="Cancelar"
         variant="warning"
       />
+
+      {/* ── Barra flutuante de seleção múltipla ──────────────────────────── */}
+      {selectionMode && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between gap-3 bg-white rounded-2xl shadow-2xl border border-slate-200 px-4 py-3 w-11/12 max-w-2xl">
+          <span className="text-xs font-semibold text-slate-500 whitespace-nowrap">
+            {selectedItemIds.size} sel.
+          </span>
+
+          {selectedItemIds.size >= 2 && (
+            <>
+              <button
+                onClick={handleMultiCheck}
+                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-green-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-green-700 active:scale-95 transition-transform"
+              >
+                <span className="hidden sm:inline">✅ Localizado</span>
+                <span className="sm:hidden">✅ Loc</span>
+              </button>
+              <button
+                onClick={() => {
+                  setMultiMoveSpaceSearch("");
+                  setMultiMoveTargetSpaceId("");
+                  setMultiMoveOpen(true);
+                }}
+                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 active:scale-95 transition-transform"
+              >
+                <span className="hidden sm:inline">➡️ Mover</span>
+                <span className="sm:hidden">➡️ Mov</span>
+              </button>
+              <button
+                onClick={handleMultiUnfound}
+                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-700 active:scale-95 transition-transform"
+              >
+                <span className="hidden sm:inline">🚫 N. Loc.</span>
+                <span className="sm:hidden">🚫 NL</span>
+              </button>
+            </>
+          )}
+
+          <button
+            onClick={exitSelectionMode}
+            className="ml-1 w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-600 hover:bg-slate-200 text-sm font-bold active:scale-95 transition-transform flex-shrink-0"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* ── Modal de destino para mover em multi-select ───────────────────── */}
+      {multiMoveOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setMultiMoveOpen(false);
+            }
+          }}
+        >
+          <div className="bg-white w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl shadow-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-slate-800">
+                Mover {selectedItemIds.size} item(ns)
+              </h3>
+              <button
+                onClick={() => setMultiMoveOpen(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-600 hover:bg-slate-200 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="relative mb-4">
+              <input
+                type="text"
+                placeholder="Buscar sala de destino..."
+                autoFocus
+                value={multiMoveSpaceSearch}
+                onFocus={() => setMultiMoveSpaceDropdownOpen(true)}
+                onBlur={() =>
+                  setTimeout(() => setMultiMoveSpaceDropdownOpen(false), 150)
+                }
+                onChange={(e) => {
+                  setMultiMoveSpaceSearch(e.target.value);
+                  setMultiMoveTargetSpaceId("");
+                  setMultiMoveSpaceDropdownOpen(true);
+                }}
+                className={`w-full border rounded-xl px-4 py-2.5 text-sm ${
+                  multiMoveTargetSpaceId
+                    ? "border-blue-400 bg-blue-50"
+                    : "border-slate-300"
+                }`}
+              />
+              {multiMoveSpaceDropdownOpen && (
+                <div className="absolute z-10 w-full bg-white border border-slate-200 rounded-xl shadow-lg mt-1 max-h-52 overflow-auto">
+                  {spaces
+                    .filter((s) => s.id !== spaceId)
+                    .filter(
+                      (s) =>
+                        multiMoveSpaceSearch === "" ||
+                        s.name
+                          .toLowerCase()
+                          .includes(multiMoveSpaceSearch.toLowerCase()),
+                    )
+                    .map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setMultiMoveTargetSpaceId(s.id);
+                          setMultiMoveSpaceSearch(s.name);
+                          setMultiMoveSpaceDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-4 py-2.5 text-sm border-b border-slate-100 last:border-0 hover:bg-slate-50 ${
+                          multiMoveTargetSpaceId === s.id
+                            ? "bg-blue-50 text-blue-700 font-medium"
+                            : ""
+                        }`}
+                      >
+                        {s.name}
+                      </button>
+                    ))}
+                  {spaces.filter(
+                    (s) =>
+                      s.id !== spaceId &&
+                      multiMoveSpaceSearch !== "" &&
+                      !s.name
+                        .toLowerCase()
+                        .includes(multiMoveSpaceSearch.toLowerCase()),
+                  ).length ===
+                    spaces.filter((s) => s.id !== spaceId).length && (
+                    <p className="px-4 py-2.5 text-sm text-slate-400">
+                      Nenhuma sala encontrada
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={handleMultiMove}
+              disabled={!multiMoveTargetSpaceId}
+              className="w-full py-2.5 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            >
+              Confirmar movimentação
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

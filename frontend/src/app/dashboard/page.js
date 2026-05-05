@@ -57,6 +57,10 @@ const DASHBOARD_TABS = [
     id: "criar-grupos",
     label: "Criar Grupos",
   },
+  {
+    id: "nao-localizados",
+    label: "Não Localizados",
+  },
 ];
 
 export default function DashboardPage() {
@@ -99,6 +103,18 @@ export default function DashboardPage() {
   const [loadingGroups, setLoadingGroups] = useState(false);
   const [expandedCreatedGroups, setExpandedCreatedGroups] = useState({});
   const [groupSubTab, setGroupSubTab] = useState("itens");
+
+  // Estados para aba "Não Localizados"
+  const [unfoundItems, setUnfoundItems] = useState([]);
+  const [unfoundLoading, setUnfoundLoading] = useState(false);
+  const [expandedUnfoundItem, setExpandedUnfoundItem] = useState(null);
+  const [unfoundSubTab, setUnfoundSubTab] = useState("itens");
+  const [unfoundItemHistory, setUnfoundItemHistory] = useState([]);
+  const [unfoundHistoryLoading, setUnfoundHistoryLoading] = useState(false);
+  const [expandedUnfoundItems, setExpandedUnfoundItems] = useState({});
+  const [unfoundActionModal, setUnfoundActionModal] = useState(null); // { item, action }
+  const [unfoundCondicao, setUnfoundCondicao] = useState("EXCELENTE");
+  const [savingUnfoundAction, setSavingUnfoundAction] = useState(false);
   const router = useRouter();
   const { showToast } = useToast();
 
@@ -136,6 +152,14 @@ export default function DashboardPage() {
       batch_checked: {
         title: "✅ Conferência em massa",
         msg: `${lastEvent.data.user} conferiu ${lastEvent.data.count} itens.`,
+      },
+      batch_unfound: {
+        title: "Não localizados em massa",
+        msg: `${lastEvent.data.user} marcou ${lastEvent.data.count} itens como não localizados.`,
+      },
+      batch_relocated: {
+        title: "📦 Movimentação em massa",
+        msg: `${lastEvent.data.user} moveu ${lastEvent.data.count} itens em lote.`,
       },
       item_restored: {
         title: "🔄 Item restaurado",
@@ -237,9 +261,18 @@ export default function DashboardPage() {
     value ? new Date(value).toLocaleDateString("pt-BR") : "--/--/--";
 
   const formatSpaceExecutionStatus = (space) => {
+    if (space.isVerifiedByRevisor) {
+      const date = fmtDate(space.finalizedAt || space.startedAt);
+      return {
+        label: `🟣 Verificado pelo revisor em ${date}`,
+        className: "bg-purple-100 text-purple-800",
+      };
+    }
+
     if (space.isFinalized || space.executionStatus === "FINALIZADO") {
       const date = fmtDate(space.finalizedAt || space.startedAt);
-      const by = space.finalizedBy || space.startedBy || "usuário não identificado";
+      const by =
+        space.finalizedBy || space.startedBy || "usuário não identificado";
       return {
         label: `🟢 Finalizado em ${date} por ${by}`,
         className: "bg-emerald-100 text-emerald-800",
@@ -305,14 +338,18 @@ export default function DashboardPage() {
       setActiveTab("espacos");
     }
 
-    if (activeTab === "criar-grupos") {
-      const token = localStorage.getItem("token");
-      if (token) {
+    const token = localStorage.getItem("token");
+    if (token) {
+      if (activeTab === "criar-grupos") {
         loadAllItems(token);
         loadItemGroups(token);
       }
+
+      if (activeTab === "nao-localizados") {
+        loadUnfoundItems(token);
+      }
     }
-  }, [activeTab, visibleTabs]);
+  }, [activeTab, visibleTabs, unfoundSubTab]);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -491,6 +528,140 @@ export default function DashboardPage() {
       });
     } finally {
       setLoadingGroups(false);
+    }
+  };
+
+  const loadUnfoundItems = async (token) => {
+    try {
+      setUnfoundLoading(true);
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const { data } = await axios.get(`${API}/audit/unfound-items`, {
+        params: { inventoryId, limit: 1000 },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      const items = Array.isArray(data.items) ? data.items : [];
+
+      // Filtrar apenas itens não localizados (excluindo movidos pendentes)
+      const unfoundOnly = items.filter(
+        (item) => item.statusAtual !== "MOVIDO_PENDENTE_ACEITE",
+      );
+
+      // Enriquecer itens com informação de quem marcou como NAO_LOCALIZADO
+      const enrichedItems = unfoundOnly.map((item) => {
+        const naoLocalizadoHistory = item.historicoLocalizacoes?.find(
+          (h) => h.action === "NAO_LOCALIZADO",
+        );
+        return {
+          ...item,
+          marcadoPorQuem:
+            naoLocalizadoHistory?.createdBy || item.conferente || "-",
+          marcadoEm:
+            naoLocalizadoHistory?.createdAt || item.dataUltimaAlteracao,
+        };
+      });
+
+      enrichedItems.sort((a, b) => {
+        const aNum = parseInt(a.patrimonio) || 0;
+        const bNum = parseInt(b.patrimonio) || 0;
+        return aNum - bNum;
+      });
+
+      setUnfoundItems(enrichedItems);
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha ao carregar não localizados",
+        message:
+          err.response?.data?.error ||
+          "Não foi possível carregar itens não localizados.",
+      });
+    } finally {
+      setUnfoundLoading(false);
+    }
+  };
+
+  const loadUnfoundItemHistory = async (token) => {
+    try {
+      setUnfoundHistoryLoading(true);
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const { data } = await axios.get(`${API}/audit/unfound-items`, {
+        params: {
+          inventoryId,
+          limit: 100,
+        },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      // Format the unfound items to a history-like view
+      const historyItems = (data.items || []).map((item) => {
+        const latestMove = item.historicoLocalizacoes?.[0];
+        return {
+          id: item.id,
+          itemPatrimonio: item.patrimonio,
+          itemDescricao: item.descricao,
+          userName: item.conferente || item.ultimoResponsavel,
+          timestamp: item.dataUltimaAlteracao,
+          action: latestMove?.action || "NAO_LOCALIZADO",
+        };
+      });
+
+      setUnfoundItemHistory(historyItems);
+    } catch (err) {
+      // Falha silenciosa se o endpoint não existir
+      console.warn("Error loading unfound item history:", err);
+      setUnfoundItemHistory([]);
+    } finally {
+      setUnfoundHistoryLoading(false);
+    }
+  };
+
+  const handleUnfoundItemAction = async (
+    item,
+    action,
+    condicao = "EXCELENTE",
+  ) => {
+    if (!item || !action) return;
+
+    try {
+      setSavingUnfoundAction(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+
+      if (action === "encontrado") {
+        // Marcar como encontrado
+        await axios.post(
+          `${API}/items/${item.id}/check`,
+          {
+            statusEncontrado: "SIM",
+            condicaoVisual: condicao,
+          },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { inventoryId },
+          },
+        );
+
+        showToast({
+          type: "success",
+          title: "Item marcado como encontrado",
+          message: `Patrimônio #${item.patrimonio} atualizado com sucesso.`,
+        });
+
+        // Recarregar itens não localizados
+        setUnfoundActionModal(null);
+        await loadUnfoundItems(token);
+      }
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha ao atualizar item",
+        message:
+          err.response?.data?.error ||
+          "Não foi possível atualizar o status do item.",
+      });
+    } finally {
+      setSavingUnfoundAction(false);
     }
   };
 
@@ -1572,6 +1743,230 @@ export default function DashboardPage() {
               </div>
             )}
           </section>
+        ) : activeTab === "nao-localizados" ? (
+          <section className="mt-10 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            {/* Sub-abas */}
+            <div className="mb-5 flex gap-2 border-b border-slate-200 pb-3">
+              <button
+                type="button"
+                onClick={() => setUnfoundSubTab("itens")}
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                  unfoundSubTab === "itens"
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+              >
+                Itens Não Localizados
+              </button>
+              <button
+                type="button"
+                onClick={() => setUnfoundSubTab("historico")}
+                className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
+                  unfoundSubTab === "historico"
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+              >
+                Histórico
+                {unfoundItems.length > 0 && (
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-xs font-semibold ${
+                      unfoundSubTab === "historico"
+                        ? "bg-white/20 text-white"
+                        : "bg-slate-300 text-slate-700"
+                    }`}
+                  >
+                    {unfoundItems.length}
+                  </span>
+                )}
+              </button>
+            </div>
+
+            {/* Sub-aba: Itens Não Localizados */}
+            {unfoundSubTab === "itens" && (
+              <div className="rounded-xl border border-slate-200 p-4">
+                {unfoundLoading ? (
+                  <p className="py-8 text-center text-sm text-slate-600">
+                    Carregando itens não localizados...
+                  </p>
+                ) : unfoundItems.length === 0 ? (
+                  <div className="text-center py-8">
+                    <div className="text-4xl mb-2">✓</div>
+                    <p className="text-slate-600 font-medium">
+                      Todos os itens foram localizados!
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {unfoundItems.map((item) => {
+                      const isExpanded = expandedUnfoundItems[item.id];
+                      return (
+                        <div
+                          key={item.id}
+                          className="rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100"
+                        >
+                          <button
+                            onClick={() =>
+                              setExpandedUnfoundItems((prev) => ({
+                                ...prev,
+                                [item.id]: !prev[item.id],
+                              }))
+                            }
+                            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="font-semibold text-slate-900">
+                                #{item.patrimonio}
+                              </p>
+                              <p className="text-xs text-slate-600 truncate">
+                                {item.descricao}
+                              </p>
+                              <p className="text-xs text-slate-500 mt-1">
+                                Localização:{" "}
+                                {item.space?.name || "Sem informação"}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <span className="rounded-full px-2 py-0.5 text-xs font-semibold bg-rose-100 text-rose-700">
+                                Não Localizado
+                              </span>
+                              <span className="text-xs font-semibold text-slate-500">
+                                {isExpanded ? "▲" : "▼"}
+                              </span>
+                            </div>
+                          </button>
+
+                          {isExpanded && (
+                            <div className="border-t border-slate-200 bg-white p-3">
+                              <div className="space-y-3 text-sm">
+                                <div>
+                                  <p className="text-xs font-medium text-slate-500 uppercase">
+                                    Patrimônio
+                                  </p>
+                                  <p className="text-slate-900 font-medium">
+                                    {item.patrimonio}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-xs font-medium text-slate-500 uppercase">
+                                    Descrição
+                                  </p>
+                                  <p className="text-slate-900">
+                                    {item.descricao}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-xs font-medium text-slate-500 uppercase">
+                                    Condição Visual
+                                  </p>
+                                  <p className="text-slate-900">
+                                    {item.condicaoVisual}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-xs font-medium text-slate-500 uppercase">
+                                    Localização Registrada
+                                  </p>
+                                  <p className="text-slate-900">
+                                    {item.space?.name || "Sem informação"}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="mt-4 pt-4 border-t border-slate-200 flex gap-2">
+                                <button
+                                  onClick={() =>
+                                    setUnfoundActionModal({
+                                      item,
+                                      action: "encontrado",
+                                    })
+                                  }
+                                  className="flex-1 px-3 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition"
+                                >
+                                  ✅ Encontrado
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    showToast({
+                                      type: "info",
+                                      title: "Recurso em desenvolvimento",
+                                      message:
+                                        "A funcionalidade de mover está em desenvolvimento.",
+                                    })
+                                  }
+                                  className="flex-1 px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition"
+                                >
+                                  ➡️ Mover
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Sub-aba: Histórico */}
+            {unfoundSubTab === "historico" && (
+              <div className="rounded-xl border border-slate-200 p-4">
+                {unfoundLoading ? (
+                  <p className="py-8 text-center text-sm text-slate-600">
+                    Carregando histórico...
+                  </p>
+                ) : unfoundItems.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-slate-600">
+                    Nenhum histórico de itens não localizados.
+                  </p>
+                ) : (
+                  <div className="overflow-hidden rounded-lg border border-slate-200">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-50 text-slate-700">
+                        <tr>
+                          <th className="px-3 py-2">Patrimônio</th>
+                          <th className="px-3 py-2">Descrição</th>
+                          <th className="px-3 py-2">Marcado por</th>
+                          <th className="px-3 py-2">Data/Hora</th>
+                          <th className="px-3 py-2">Localização</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {unfoundItems.map((item, index) => (
+                          <tr key={index} className="border-t border-slate-100">
+                            <td className="px-3 py-2 font-medium text-slate-900">
+                              #{item.patrimonio || "-"}
+                            </td>
+                            <td className="px-3 py-2 text-slate-600 truncate max-w-xs">
+                              {item.descricao || "-"}
+                            </td>
+                            <td className="px-3 py-2 text-slate-600 text-xs">
+                              {item.marcadoPorQuem || "-"}
+                            </td>
+                            <td className="px-3 py-2 text-slate-600 text-xs">
+                              {item.marcadoEm
+                                ? new Date(item.marcadoEm).toLocaleString(
+                                    "pt-BR",
+                                  )
+                                : item.dataUltimaAlteracao
+                                  ? new Date(
+                                      item.dataUltimaAlteracao,
+                                    ).toLocaleString("pt-BR")
+                                  : "-"}
+                            </td>
+                            <td className="px-3 py-2 text-slate-600 text-xs">
+                              {item.ultimoLocalConhecido || "-"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
         ) : activeTab !== "espacos" ? (
           <section className="mt-10 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
             {isInventoryAdmin ? (
@@ -2054,6 +2449,84 @@ export default function DashboardPage() {
             className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
           >
             {creatingGroup ? "Criando grupo..." : "Criar Grupo"}
+          </button>
+        </ModalFooter>
+      </Modal>
+
+      {/* Modal para ação de item não localizado */}
+      <Modal
+        isOpen={!!unfoundActionModal}
+        onClose={() => setUnfoundActionModal(null)}
+        title="Marcar item como encontrado"
+        size="md"
+      >
+        <ModalBody>
+          <div className="space-y-4">
+            <div>
+              <p className="text-sm font-semibold text-slate-800">
+                Item: #{unfoundActionModal?.item?.patrimonio}
+              </p>
+              <p className="text-xs text-slate-600 mt-1">
+                {unfoundActionModal?.item?.descricao}
+              </p>
+            </div>
+
+            <div>
+              <p className="mb-3 text-sm font-semibold text-slate-700">
+                Estado de conservação:
+              </p>
+              <div className="space-y-2">
+                {["EXCELENTE", "BOM", "INSERVIVEL"].map((status) => (
+                  <button
+                    key={status}
+                    onClick={() => setUnfoundCondicao(status)}
+                    className={`w-full py-2 px-3 rounded-lg font-medium text-sm transition ${
+                      unfoundCondicao === status
+                        ? "bg-blue-600 text-white"
+                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                    }`}
+                  >
+                    {status === "EXCELENTE"
+                      ? "🟢 Excelente"
+                      : status === "BOM"
+                        ? "🟡 Bom"
+                        : "🔴 Inservível"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-blue-50 p-3 border border-blue-200">
+              <p className="text-xs text-blue-800">
+                O item será marcado como encontrado com a condição visual
+                selecionada.
+              </p>
+            </div>
+          </div>
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => setUnfoundActionModal(null)}
+            disabled={savingUnfoundAction}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={() => {
+              if (unfoundActionModal?.item) {
+                handleUnfoundItemAction(
+                  unfoundActionModal.item,
+                  unfoundActionModal.action,
+                  unfoundCondicao,
+                );
+              }
+            }}
+            disabled={savingUnfoundAction}
+            className="rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+          >
+            {savingUnfoundAction ? "Salvando..." : "Confirmar"}
           </button>
         </ModalFooter>
       </Modal>
