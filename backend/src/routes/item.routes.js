@@ -132,7 +132,14 @@ router.get("/all", verifyJWT, requireInventoryAccess(), async (req, res) => {
         spaceId: true,
         statusEncontrado: true,
         condicaoVisual: true,
-        space: { select: { id: true, name: true } },
+        space: {
+          select: {
+            id: true,
+            name: true,
+            isFinalized: true,
+            isVerifiedByRevisor: true,
+          },
+        },
       },
       orderBy: { patrimonio: "asc" },
     });
@@ -175,6 +182,8 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
           select: {
             id: true,
             name: true,
+            isFinalized: true,
+            isVerifiedByRevisor: true,
           },
         },
         itemGroupId: true,
@@ -256,6 +265,8 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
         descricao: item.descricao,
         spaceId: item.spaceId,
         spaceName: item.space?.name || "Sem localização",
+        spaceIsFinalized: item.space?.isFinalized || false,
+        spaceIsVerifiedByRevisor: item.space?.isVerifiedByRevisor || false,
         itemGroupId: item.itemGroupId || null,
         itemGroup: item.itemGroup
           ? {
@@ -423,11 +434,23 @@ router.post(
 
       const targetSpace = await prisma.space.findFirst({
         where: { id: targetSpaceId, inventoryId: req.inventoryId },
-        select: { id: true },
+        select: { id: true, isFinalized: true },
       });
 
       if (!targetSpace) {
         return res.status(400).json({ error: "Espaço de destino inválido" });
+      }
+
+      if (targetSpace.isFinalized) {
+        return res.status(409).json({ error: "A sala de destino está finalizada e não pode receber itens" });
+      }
+
+      const sourceSpace = await prisma.space.findUnique({
+        where: { id: item.spaceId },
+        select: { isFinalized: true },
+      });
+      if (sourceSpace?.isFinalized) {
+        return res.status(409).json({ error: "Esta sala está finalizada e não pode ter itens removidos" });
       }
 
       if (item.spaceId === targetSpaceId) {
@@ -553,7 +576,7 @@ router.post(
       const [targetSpace, items] = await Promise.all([
         prisma.space.findFirst({
           where: { id: targetSpaceId, inventoryId: req.inventoryId },
-          select: { id: true },
+          select: { id: true, isFinalized: true },
         }),
         prisma.item.findMany({
           where: {
@@ -568,6 +591,18 @@ router.post(
 
       if (!targetSpace) {
         return res.status(400).json({ error: "Espaço de destino inválido" });
+      }
+
+      if (targetSpace.isFinalized) {
+        return res.status(409).json({ error: "A sala de destino está finalizada e não pode receber itens" });
+      }
+
+      const sourceSpace = await prisma.space.findUnique({
+        where: { id: sourceSpaceId },
+        select: { isFinalized: true },
+      });
+      if (sourceSpace?.isFinalized) {
+        return res.status(409).json({ error: "Esta sala está finalizada e não pode ter itens removidos" });
       }
 
       if (items.length === 0) {
@@ -1233,11 +1268,11 @@ router.post(
       const [space, targetSpace] = await Promise.all([
         prisma.space.findFirst({
           where: { id: spaceId, inventoryId: req.inventoryId },
-          select: { id: true },
+          select: { id: true, isFinalized: true },
         }),
         prisma.space.findFirst({
           where: { id: targetSpaceId, inventoryId: req.inventoryId },
-          select: { id: true, name: true },
+          select: { id: true, name: true, isFinalized: true },
         }),
       ]);
 
@@ -1246,6 +1281,9 @@ router.post(
       }
       if (!targetSpace) {
         return res.status(400).json({ error: "Espaço de destino inválido" });
+      }
+      if (targetSpace.isFinalized) {
+        return res.status(409).json({ error: "A sala de destino está finalizada e não pode receber itens" });
       }
 
       const spaceItems = await prisma.item.findMany({

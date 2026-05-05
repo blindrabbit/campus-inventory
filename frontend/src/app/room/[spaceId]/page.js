@@ -120,6 +120,7 @@ export default function RoomPage() {
   const [verificationItems, setVerificationItems] = useState([]);
   const [isVerifying, setIsVerifying] = useState(false);
   const [isRevertModalOpen, setIsRevertModalOpen] = useState(false);
+  const [reopenJustification, setReopenJustification] = useState("");
   const verificationInitiatedRef = useRef(false);
   const [inventoryRole, setInventoryRole] = useState(null);
 
@@ -663,8 +664,15 @@ export default function RoomPage() {
           verificationRoll: data.verificationRoll,
           verified: data.verified,
           remaining: data.remaining,
+          totalToReview: data.items.length,
         });
-        setVerificationItems(data.items.map((i) => i.id));
+        // Only include items still pending — already-verified items must NOT
+        // appear here or the purple buttons will show for them incorrectly
+        setVerificationItems(
+          data.items
+            .filter((i) => i.verificationStatus === "REVERIFICAR")
+            .map((i) => i.id),
+        );
       }
     } catch (err) {
       console.error("Error loading verification status:", err);
@@ -678,17 +686,18 @@ export default function RoomPage() {
 
       await axios.post(
         `${API}/spaces/${spaceId}/revert-finalization`,
-        { reason: "revisor_requested", inventoryId },
+        { justification: reopenJustification, inventoryId },
         { headers: { Authorization: `Bearer ${token}` } },
       );
 
       showToast({
         type: "success",
-        title: "Sala Revertida",
-        message: "Sala retornada para inspeção dos conferentes",
+        title: "Sala Reaberta",
+        message: "Sala reaberta para inspeção dos conferentes",
       });
 
       setIsRevertModalOpen(false);
+      setReopenJustification("");
       setTimeout(() => router.push("/dashboard"), 1500);
     } catch (err) {
       showToast({
@@ -1887,43 +1896,62 @@ export default function RoomPage() {
 
                 {searchResults.length > 0 && (
                   <ul className="border rounded-lg divide-y max-h-64 overflow-auto">
-                    {searchResults.map((candidate) => (
-                      <li
-                        key={candidate.id}
-                        className={`p-3 flex items-start justify-between gap-3 border-l-4 ${
-                          candidate.spaceId === spaceId
-                            ? "bg-sky-50 border-sky-400"
-                            : "bg-amber-50 border-amber-400"
-                        }`}
-                      >
-                        <div>
-                          <p className="font-semibold text-sm">
-                            #{candidate.patrimonio}
-                          </p>
-                          <p className="text-sm text-gray-700">
-                            {candidate.descricao}
-                          </p>
-                          <p className="text-xs text-gray-500">
-                            {candidate.spaceId === spaceId
-                              ? `Já está nesta sala${candidate.spaceName ? ` • ${candidate.spaceName}` : ""}`
-                              : `Origem: ${candidate.spaceName || "Sala não informada"}`}
-                          </p>
-                        </div>
-                        <button
-                          onClick={() => handleSearchResultAction(candidate)}
-                          disabled={saving}
-                          className={`px-3 py-1.5 text-white rounded-lg text-sm disabled:opacity-50 ${
-                            candidate.spaceId === spaceId
-                              ? "bg-emerald-600 hover:bg-emerald-700"
-                              : "bg-blue-600 hover:bg-blue-700"
+                    {searchResults.map((candidate) => {
+                      const isInCurrentRoom = candidate.spaceId === spaceId;
+                      const isSealed = !isInCurrentRoom && candidate.spaceIsFinalized;
+                      const isRevisorVerified = candidate.spaceIsVerifiedByRevisor;
+
+                      return (
+                        <li
+                          key={candidate.id}
+                          className={`p-3 flex items-start justify-between gap-3 border-l-4 ${
+                            isInCurrentRoom
+                              ? "bg-sky-50 border-sky-400"
+                              : isSealed
+                              ? "bg-purple-50 border-purple-400"
+                              : "bg-amber-50 border-amber-400"
                           }`}
                         >
-                          {candidate.spaceId === spaceId
-                            ? "Confirmar na sala"
-                            : "Mover para esta sala"}
-                        </button>
-                      </li>
-                    ))}
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-sm">
+                              #{candidate.patrimonio}
+                            </p>
+                            <p className="text-sm text-gray-700">
+                              {candidate.descricao}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              {isInCurrentRoom
+                                ? `Já está nesta sala${candidate.spaceName ? ` • ${candidate.spaceName}` : ""}`
+                                : `Origem: ${candidate.spaceName || "Sala não informada"}`}
+                            </p>
+                            {isSealed && (
+                              <p className="text-xs text-purple-600 font-medium mt-1">
+                                🔒 {isRevisorVerified ? "Sala revisada e lacrada" : "Sala lacrada"} — para mover este item, a sala precisa ser reaberta pelo administrador.
+                              </p>
+                            )}
+                          </div>
+                          {isSealed ? (
+                            <span className="shrink-0 px-3 py-1.5 bg-purple-100 text-purple-600 rounded-lg text-sm font-medium">
+                              🔒 Lacrado
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => handleSearchResultAction(candidate)}
+                              disabled={saving}
+                              className={`shrink-0 px-3 py-1.5 text-white rounded-lg text-sm disabled:opacity-50 ${
+                                isInCurrentRoom
+                                  ? "bg-emerald-600 hover:bg-emerald-700"
+                                  : "bg-blue-600 hover:bg-blue-700"
+                              }`}
+                            >
+                              {isInCurrentRoom
+                                ? "Confirmar na sala"
+                                : "Mover para esta sala"}
+                            </button>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>
@@ -2024,20 +2052,30 @@ export default function RoomPage() {
                               <button
                                 key={s.id}
                                 type="button"
+                                disabled={s.isFinalized}
                                 onMouseDown={(e) => e.preventDefault()}
                                 onClick={() => {
+                                  if (s.isFinalized) return;
                                   setBatchTargetSpaceId(s.id);
                                   setBatchSpaceSearch(s.name);
                                   setBatchSpaceDropdownOpen(false);
                                   setBatchPreview(null);
                                 }}
-                                className={`w-full text-left px-3 py-2.5 text-sm border-b border-slate-100 last:border-0 hover:bg-slate-50 ${
-                                  batchTargetSpaceId === s.id
+                                className={`w-full text-left px-3 py-2.5 text-sm border-b border-slate-100 last:border-0 ${
+                                  s.isFinalized
+                                    ? "bg-purple-50 text-purple-400 cursor-not-allowed"
+                                    : batchTargetSpaceId === s.id
                                     ? "bg-blue-50 text-blue-700 font-medium"
-                                    : ""
+                                    : "hover:bg-slate-50"
                                 }`}
                               >
+                                {s.isFinalized && "🔒 "}
                                 {s.name}
+                                {s.isFinalized && (
+                                  <span className="ml-2 text-xs text-purple-500">
+                                    {s.isVerifiedByRevisor ? "revisado" : "lacrada"}
+                                  </span>
+                                )}
                               </button>
                             ))}
                           {spaces
@@ -2494,13 +2532,15 @@ export default function RoomPage() {
                                   <div className="flex justify-between gap-2 md:gap-4 w-full mt-3">
                                     {!selectionMode &&
                                       (item.verificationStatus ===
-                                      "REVERIFICAR"
+                                        "REVERIFICAR" ||
+                                      verificationItems?.includes(item.id)
                                         ? ["REVISOR", "ADMIN_CICLO"].includes(
                                             inventoryRole,
                                           )
                                           ? (
                                             <>
                                               <button
+                                                disabled={saving}
                                                 onClick={(e) => {
                                                   e.stopPropagation();
                                                   handleVerifyCheck(
@@ -2508,7 +2548,7 @@ export default function RoomPage() {
                                                     "SIM",
                                                   );
                                                 }}
-                                                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-purple-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-purple-700 transition"
+                                                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-purple-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-purple-700 transition disabled:opacity-50"
                                               >
                                                 <span className="hidden md:inline">
                                                   ✅ Está aqui
@@ -2518,6 +2558,7 @@ export default function RoomPage() {
                                                 </span>
                                               </button>
                                               <button
+                                                disabled={saving}
                                                 onClick={(e) => {
                                                   e.stopPropagation();
                                                   handleVerifyCheck(
@@ -2525,7 +2566,7 @@ export default function RoomPage() {
                                                     "NAO",
                                                   );
                                                 }}
-                                                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition"
+                                                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition disabled:opacity-50"
                                               >
                                                 <span className="hidden md:inline">
                                                   ❌ Não está aqui
@@ -2566,20 +2607,22 @@ export default function RoomPage() {
                                                     ✅ Enc.
                                                   </span>
                                                 </button>
-                                                <button
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    setRelocateModal(item);
-                                                  }}
-                                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 transition"
-                                                >
-                                                  <span className="hidden md:inline">
-                                                    ➡️ Mover
-                                                  </span>
-                                                  <span className="md:hidden">
-                                                    ➡️ Mov.
-                                                  </span>
-                                                </button>
+                                                {!space?.isFinalized && (
+                                                  <button
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      setRelocateModal(item);
+                                                    }}
+                                                    className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 transition"
+                                                  >
+                                                    <span className="hidden md:inline">
+                                                      ➡️ Mover
+                                                    </span>
+                                                    <span className="md:hidden">
+                                                      ➡️ Mov.
+                                                    </span>
+                                                  </button>
+                                                )}
                                                 <button
                                                   onClick={(e) => {
                                                     e.stopPropagation();
@@ -2792,16 +2835,18 @@ export default function RoomPage() {
 
                     <div className="flex justify-between gap-2 md:gap-4 w-full mt-3">
                       {!selectionMode &&
-                        (item.verificationStatus === "REVERIFICAR"
+                        (item.verificationStatus === "REVERIFICAR" ||
+                        verificationItems?.includes(item.id)
                           ? ["REVISOR", "ADMIN_CICLO"].includes(inventoryRole)
                             ? (
                               <>
                                 <button
+                                  disabled={saving}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleVerifyCheck(item.id, "SIM");
                                   }}
-                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-purple-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-purple-700 transition"
+                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-purple-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-purple-700 transition disabled:opacity-50"
                                 >
                                   <span className="hidden md:inline">
                                     ✅ Está aqui
@@ -2809,11 +2854,12 @@ export default function RoomPage() {
                                   <span className="md:hidden">✅ Aqui</span>
                                 </button>
                                 <button
+                                  disabled={saving}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleVerifyCheck(item.id, "NAO");
                                   }}
-                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition"
+                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition disabled:opacity-50"
                                 >
                                   <span className="hidden md:inline">
                                     ❌ Não está aqui
@@ -2849,18 +2895,20 @@ export default function RoomPage() {
                                     </span>
                                     <span className="md:hidden">✅ Enc.</span>
                                   </button>
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setRelocateModal(item);
-                                    }}
-                                    className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 transition"
-                                  >
-                                    <span className="hidden md:inline">
-                                      ➡️ Mover
-                                    </span>
-                                    <span className="md:hidden">➡️ Mov.</span>
-                                  </button>
+                                  {!space?.isFinalized && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setRelocateModal(item);
+                                      }}
+                                      className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 transition"
+                                    >
+                                      <span className="hidden md:inline">
+                                        ➡️ Mover
+                                      </span>
+                                      <span className="md:hidden">➡️ Mov.</span>
+                                    </button>
+                                  )}
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
@@ -2968,12 +3016,12 @@ export default function RoomPage() {
               )}
             <div className="flex gap-3 ml-auto">
               {space?.isFinalized &&
-                ["REVISOR", "ADMIN_CICLO"].includes(inventoryRole) && (
+                inventoryRole === "ADMIN_CICLO" && (
                   <button
                     onClick={() => setIsRevertModalOpen(true)}
-                    className="px-6 py-3 bg-amber-600 text-white rounded-xl font-semibold hover:bg-amber-700 shadow-lg"
+                    className="px-6 py-3 bg-slate-600 text-white rounded-xl font-semibold hover:bg-slate-700 shadow-lg"
                   >
-                    ↩️ Retornar Etapa
+                    🔓 Reabrir Sala
                   </button>
                 )}
               {allVerificationItemsResolved && (
@@ -3013,7 +3061,7 @@ export default function RoomPage() {
         size="md"
       >
         <ModalBody>
-          <p className="text-sm text-gray-600 mb-4">
+          <p className="text-sm text-gray-600 mb-3">
             Selecione o novo espaço de destino:
           </p>
           <input
@@ -3022,44 +3070,59 @@ export default function RoomPage() {
             onChange={(e) => setRelocateSearchInput(e.target.value)}
             placeholder="Pesquisar espaço de destino..."
             className="w-full border rounded-lg p-3 mb-3"
+            autoFocus
           />
-          <select
-            className="w-full border rounded-lg p-3 mb-4"
-            onChange={(e) =>
-              e.target.value &&
-              relocateModal &&
-              handleRelocate(relocateModal.id, e.target.value)
-            }
-            defaultValue=""
-          >
-            <option value="">Selecione um espaço...</option>
-            {filteredRelocationSpaces.map((s) => {
-              const startedLabel = s.startedAt
-                ? new Date(s.startedAt).toLocaleDateString("pt-BR")
-                : "--/--/--";
-              const startedBy =
-                s.startedByDisplay || s.startedBy || "usuário não identificado";
-              const statusLabel =
-                s.startedAt ||
-                s.executionStatus === "INICIADO" ||
-                s.executionStatus === "FINALIZADO" ||
-                s.isFinalized
-                  ? `Iniciado em ${startedLabel} por ${startedBy}`
-                  : "Não iniciado";
-
-              return (
-                <option key={s.id} value={s.id}>
-                  {s.name} • {s.responsibleDisplay || s.responsible} •{" "}
-                  {statusLabel}
-                </option>
-              );
-            })}
-          </select>
-          {filteredRelocationSpaces.length === 0 ? (
-            <p className="text-sm text-amber-700 bg-amber-50 rounded-lg px-3 py-2">
-              Nenhum espaço encontrado para o termo informado.
-            </p>
-          ) : null}
+          <div className="border rounded-lg divide-y max-h-64 overflow-auto mb-2">
+            {filteredRelocationSpaces.length === 0 ? (
+              <p className="px-3 py-3 text-sm text-amber-700 bg-amber-50">
+                Nenhum espaço encontrado para o termo informado.
+              </p>
+            ) : (
+              filteredRelocationSpaces.map((s) => {
+                const isSealed = s.isFinalized;
+                const isRevisorVerified = s.isVerifiedByRevisor;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    disabled={isSealed}
+                    onClick={() =>
+                      !isSealed && relocateModal && handleRelocate(relocateModal.id, s.id)
+                    }
+                    className={`w-full text-left px-3 py-2.5 border-b border-slate-100 last:border-0 transition ${
+                      isSealed
+                        ? "bg-purple-50 cursor-not-allowed"
+                        : "hover:bg-slate-50 cursor-pointer"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-sm font-medium truncate ${isSealed ? "text-purple-700" : "text-slate-800"}`}>
+                          {isSealed && "🔒 "}
+                          {s.name}
+                        </p>
+                        <p className={`text-xs mt-0.5 ${isSealed ? "text-purple-500" : "text-slate-500"}`}>
+                          {s.responsibleDisplay || s.responsible}
+                        </p>
+                        {isSealed && (
+                          <p className="text-xs text-purple-600 font-medium mt-1">
+                            {isRevisorVerified
+                              ? "Sala revisada e lacrada — não pode receber novos itens"
+                              : "Sala lacrada — não pode receber novos itens"}
+                          </p>
+                        )}
+                      </div>
+                      {isSealed && (
+                        <span className="shrink-0 text-xs bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full font-medium mt-0.5">
+                          {isRevisorVerified ? "Revisado" : "Lacrado"}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
         </ModalBody>
         <ModalFooter>
           <button
@@ -3223,16 +3286,37 @@ export default function RoomPage() {
         variant={batchAction === "unfound" ? "danger" : "warning"}
       />
 
-      <ConfirmModal
-        isOpen={isRevertModalOpen}
-        onConfirm={handleRevertFinalization}
-        onCancel={() => setIsRevertModalOpen(false)}
-        title="Retornar Etapa"
-        message="Tem certeza que deseja retornar esta sala para inspeção dos conferentes? Isso desfará o status de finalização."
-        confirmText="Retornar"
-        cancelText="Cancelar"
-        variant="warning"
-      />
+      {isRevertModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md">
+            <h2 className="text-lg font-bold text-gray-900 mb-2">🔓 Reabrir Sala</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Esta ação remove o lacre da sala e permite novas conferências. Descreva o motivo da reabertura.
+            </p>
+            <textarea
+              value={reopenJustification}
+              onChange={(e) => setReopenJustification(e.target.value)}
+              placeholder="Descreva a justificativa para reabrir esta sala (mínimo 10 caracteres)..."
+              className="w-full border border-gray-300 rounded-xl p-3 text-sm resize-none h-28 focus:outline-none focus:ring-2 focus:ring-slate-400 mb-4"
+            />
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => { setIsRevertModalOpen(false); setReopenJustification(""); }}
+                className="px-4 py-2 rounded-xl border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleRevertFinalization}
+                disabled={reopenJustification.trim().length < 10}
+                className="px-4 py-2 rounded-xl bg-slate-700 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                🔓 Confirmar Reabertura
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Barra flutuante de seleção múltipla ──────────────────────────── */}
       {selectionMode && (
@@ -3241,7 +3325,7 @@ export default function RoomPage() {
             {selectedItemIds.size} sel.
           </span>
 
-          {selectedItemIds.size >= 2 && (
+          {selectedItemIds.size >= 2 && !space?.isFinalized && (
             <>
               <button
                 onClick={handleMultiCheck}
@@ -3339,19 +3423,29 @@ export default function RoomPage() {
                       <button
                         key={s.id}
                         type="button"
+                        disabled={s.isFinalized}
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => {
+                          if (s.isFinalized) return;
                           setMultiMoveTargetSpaceId(s.id);
                           setMultiMoveSpaceSearch(s.name);
                           setMultiMoveSpaceDropdownOpen(false);
                         }}
-                        className={`w-full text-left px-4 py-2.5 text-sm border-b border-slate-100 last:border-0 hover:bg-slate-50 ${
-                          multiMoveTargetSpaceId === s.id
+                        className={`w-full text-left px-4 py-2.5 text-sm border-b border-slate-100 last:border-0 ${
+                          s.isFinalized
+                            ? "bg-purple-50 text-purple-400 cursor-not-allowed"
+                            : multiMoveTargetSpaceId === s.id
                             ? "bg-blue-50 text-blue-700 font-medium"
-                            : ""
+                            : "hover:bg-slate-50"
                         }`}
                       >
+                        {s.isFinalized && "🔒 "}
                         {s.name}
+                        {s.isFinalized && (
+                          <span className="ml-2 text-xs text-purple-500">
+                            {s.isVerifiedByRevisor ? "revisado" : "lacrada"}
+                          </span>
+                        )}
                       </button>
                     ))}
                   {spaces.filter(

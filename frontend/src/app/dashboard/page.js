@@ -261,14 +261,6 @@ export default function DashboardPage() {
     value ? new Date(value).toLocaleDateString("pt-BR") : "--/--/--";
 
   const formatSpaceExecutionStatus = (space) => {
-    if (space.isVerifiedByRevisor) {
-      const date = fmtDate(space.finalizedAt || space.startedAt);
-      return {
-        label: `🟣 Verificado pelo revisor em ${date}`,
-        className: "bg-purple-100 text-purple-800",
-      };
-    }
-
     if (space.isFinalized || space.executionStatus === "FINALIZADO") {
       const date = fmtDate(space.finalizedAt || space.startedAt);
       const by =
@@ -1590,30 +1582,53 @@ export default function DashboardPage() {
                             {isExpanded && (
                               <div className="border-t border-slate-200 bg-white">
                                 <div className="max-h-72 space-y-1 overflow-y-auto p-3">
-                                  {items.map((item) => (
-                                    <label
-                                      key={item.id}
-                                      className="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 hover:bg-slate-50"
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={selectedItems.has(item.id)}
-                                        onChange={() =>
-                                          handleToggleItemSelection(item.id)
-                                        }
-                                        className="mt-1"
-                                      />
-                                      <div className="flex-1 text-sm">
-                                        <p className="font-medium text-slate-900">
-                                          #{item.patrimonio}
-                                        </p>
-                                        <p className="text-xs text-slate-600">
-                                          {item.space?.name} •{" "}
-                                          {item.condicaoVisual}
-                                        </p>
-                                      </div>
-                                    </label>
-                                  ))}
+                                  {items.map((item) => {
+                                    const isSealed = item.space?.isFinalized;
+                                    const isRevisorVerified = item.space?.isVerifiedByRevisor;
+                                    return (
+                                      <label
+                                        key={item.id}
+                                        className={`flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2 ${
+                                          isRevisorVerified
+                                            ? "bg-purple-50 hover:bg-purple-100"
+                                            : isSealed
+                                              ? "bg-purple-50/60 hover:bg-purple-100/60"
+                                              : "hover:bg-slate-50"
+                                        }`}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={selectedItems.has(item.id)}
+                                          onChange={() =>
+                                            !isSealed && handleToggleItemSelection(item.id)
+                                          }
+                                          disabled={isSealed}
+                                          className="mt-1 disabled:opacity-40"
+                                        />
+                                        <div className="flex-1 text-sm">
+                                          <div className="flex items-center gap-2 flex-wrap">
+                                            <p className={`font-medium ${isSealed ? "text-purple-900" : "text-slate-900"}`}>
+                                              #{item.patrimonio}
+                                            </p>
+                                            {isSealed && (
+                                              <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700">
+                                                🔒 {isRevisorVerified ? "Revisado — sala lacrada" : "Sala lacrada"}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <p className={`text-xs ${isSealed ? "text-purple-600" : "text-slate-600"}`}>
+                                            {item.space?.name} •{" "}
+                                            {item.condicaoVisual}
+                                          </p>
+                                          {isSealed && (
+                                            <p className="mt-0.5 text-xs text-purple-500">
+                                              Para mover este item, a sala precisa ser reaberta pelo administrador.
+                                            </p>
+                                          )}
+                                        </div>
+                                      </label>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             )}

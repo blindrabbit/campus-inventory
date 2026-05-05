@@ -521,7 +521,12 @@ router.post(
       // Verify space exists and is finalized
       const space = await prisma.space.findUnique({
         where: { id, inventoryId: req.inventoryId },
-        include: { items: { select: { id: true } } },
+        include: {
+          items: {
+            where: { statusEncontrado: { not: "NAO" } },
+            select: { id: true },
+          },
+        },
       });
 
       if (!space) {
@@ -644,11 +649,14 @@ router.post(
   "/:id/revert-finalization",
   verifyJWT,
   requireInventoryAccess(),
-  requireVerificationAccess(),
+  requireInventoryRoles("ADMIN_CICLO"),
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { reason } = req.body || {};
+      const { justification } = req.body || {};
+      if (!justification || justification.trim().length < 10) {
+        return res.status(400).json({ error: "Justificativa é obrigatória (mínimo 10 caracteres)" });
+      }
 
       // Verify space exists and is finalized
       const space = await prisma.space.findUnique({
@@ -686,7 +694,7 @@ router.post(
           where: { id: verificationRoll.id },
           data: {
             result: "REVERTED",
-            reason: reason || "Revisor reverteu a sala",
+            reason: justification,
             reviewedAt: new Date(),
           },
         });
@@ -696,15 +704,15 @@ router.post(
       await prisma.finalizationHistory.create({
         data: {
           spaceId: id,
-          action: reason === "item_not_found" ? "REVERTED_ITEM_NOT_FOUND" : "REVERTED_BY_REVISOR",
-          reason: reason || "Manual revert by revisor",
+          action: "REOPENED_BY_ADMIN",
+          reason: justification,
           actedBy: req.user.sub,
         },
       });
 
       res.json({
         success: true,
-        message: "Sala revertida para inspeção dos conferentes",
+        message: "Sala reaberta para inspeção dos conferentes",
       });
     } catch (err) {
       console.error("Error reverting finalization:", err);
@@ -750,8 +758,16 @@ router.post(
       }
 
       const selectedItemIds = JSON.parse(verificationRoll.itemIds);
+      // Only count items that are still present (statusEncontrado != "NAO") and
+      // still marked for re-verification. Items that were already marked as not
+      // found by the conferente can't be confirmed by the revisor and should not
+      // block completion.
       const unresolvedCount = await prisma.item.count({
-        where: { id: { in: selectedItemIds }, verificationStatus: "REVERIFICAR" },
+        where: {
+          id: { in: selectedItemIds },
+          verificationStatus: "REVERIFICAR",
+          statusEncontrado: { not: "NAO" },
+        },
       });
 
       if (unresolvedCount > 0) {
