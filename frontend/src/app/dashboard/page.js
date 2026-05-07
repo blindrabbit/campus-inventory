@@ -66,6 +66,10 @@ const DASHBOARD_TABS = [
     id: "nao-localizados",
     label: "Não Localizados",
   },
+  {
+    id: "backups",
+    label: "Backups",
+  },
 ];
 
 export default function DashboardPage() {
@@ -117,13 +121,28 @@ export default function DashboardPage() {
   const [unfoundItemHistory, setUnfoundItemHistory] = useState([]);
   const [unfoundHistoryLoading, setUnfoundHistoryLoading] = useState(false);
   const [expandedUnfoundItems, setExpandedUnfoundItems] = useState({});
-  const [unfoundActionModal, setUnfoundActionModal] = useState(null); // { item, action }
-  const [unfoundCondicao, setUnfoundCondicao] = useState("EXCELENTE");
+  const [unfoundActionModal, setUnfoundActionModal] = useState(null); // { item, action: "mover" }
+  const [unfoundCondicao, setUnfoundCondicao] = useState("BOM");
+  const [unfoundMoveTargetSpaceId, setUnfoundMoveTargetSpaceId] = useState("");
   const [savingUnfoundAction, setSavingUnfoundAction] = useState(false);
   const [dashboardSummary, setDashboardSummary] = useState(null);
   const [dashboardSummaryLoading, setDashboardSummaryLoading] = useState(false);
   const [dashboardSummaryError, setDashboardSummaryError] = useState("");
   const [dashboardSummaryDenied, setDashboardSummaryDenied] = useState(false);
+
+  // Backup state
+  const [backupInventories, setBackupInventories] = useState([]); // inventories the user can manage backups for
+  const [backupSelectedInventoryId, setBackupSelectedInventoryId] = useState(null);
+  const [backupList, setBackupList] = useState([]);
+  const [backupSchedule, setBackupSchedule] = useState(null);
+  const [backupLockStatus, setBackupLockStatus] = useState(null);
+  const [backupLoading, setBackupLoading] = useState(false);
+  const [backupListLoading, setBackupListLoading] = useState(false);
+  const [backupLabelInput, setBackupLabelInput] = useState("");
+  const [scheduleIntervalInput, setScheduleIntervalInput] = useState("");
+  const [backupRestoreId, setBackupRestoreId] = useState(null);
+  const [backupDeleteId, setBackupDeleteId] = useState(null);
+  const [backupConfirmAction, setBackupConfirmAction] = useState(null); // "restore" | "delete"
   const [dashboardRecentEvents, setDashboardRecentEvents] = useState([]);
   const router = useRouter();
   const { showToast } = useToast();
@@ -294,33 +313,188 @@ export default function DashboardPage() {
   const fmtDate = (value) =>
     value ? new Date(value).toLocaleDateString("pt-BR") : "--/--/--";
 
-  const formatSpaceExecutionStatus = (space) => {
+  const fmtDateTime = (value) =>
+    value ? new Date(value).toLocaleString("pt-BR") : "--";
+
+  const fmtBytes = (bytes) => {
+    if (!bytes) return "0 B";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const loadBackupInventories = async (activeId) => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    try {
+      const { data } = await axios.get(`${API}/inventories/my`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const eligible = (data || []).filter((inv) => inv.role === "ADMIN_CICLO");
+      setBackupInventories(eligible);
+      // Default to active inventory if eligible, otherwise first in list
+      const preferred = eligible.find((inv) => inv.id === activeId) || eligible[0];
+      if (preferred) setBackupSelectedInventoryId((prev) => prev || preferred.id);
+    } catch {
+      // silently fail
+    }
+  };
+
+  const loadBackupData = async (inventoryId) => {
+    const token = localStorage.getItem("token");
+    const id = inventoryId || backupSelectedInventoryId || activeInventory?.id;
+    if (!token || !id) return;
+    setBackupListLoading(true);
+    try {
+      const [listRes, schedRes, lockRes] = await Promise.all([
+        axios.get(`${API}/backups`, { params: { inventoryId: id }, headers: { Authorization: `Bearer ${token}` } }),
+        axios.get(`${API}/backups/schedule`, { params: { inventoryId: id }, headers: { Authorization: `Bearer ${token}` } }),
+        axios.get(`${API}/backups/lock-status`, { params: { inventoryId: id }, headers: { Authorization: `Bearer ${token}` } }),
+      ]);
+      setBackupList(listRes.data);
+      setBackupSchedule(schedRes.data);
+      setBackupLockStatus(lockRes.data);
+      if (schedRes.data) setScheduleIntervalInput(String(schedRes.data.intervalHours));
+    } catch {
+      // silently fail — not critical
+    } finally {
+      setBackupListLoading(false);
+    }
+  };
+
+  const handleCreateBackup = async () => {
+    const token = localStorage.getItem("token");
+    const inventoryId = backupSelectedInventoryId;
+    if (!token || !inventoryId) return;
+    setBackupLoading(true);
+    try {
+      const { data } = await axios.post(
+        `${API}/backups`,
+        { label: backupLabelInput.trim() || undefined, inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setBackupList((prev) => [data, ...prev]);
+      setBackupLabelInput("");
+      showToast({ type: "success", title: "Backup criado", message: "Arquivo SQL gerado com sucesso." });
+    } catch (err) {
+      showToast({ type: "error", title: "Erro ao criar backup", message: err.response?.data?.error || "Tente novamente." });
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const handleSaveSchedule = async () => {
+    const token = localStorage.getItem("token");
+    const inventoryId = backupSelectedInventoryId;
+    const hours = parseInt(scheduleIntervalInput, 10);
+    if (!hours || hours < 1) {
+      showToast({ type: "error", title: "Intervalo inválido", message: "Digite ao menos 1 hora." });
+      return;
+    }
+    try {
+      const { data } = await axios.post(
+        `${API}/backups/schedule`,
+        { intervalHours: hours, inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setBackupSchedule(data);
+      showToast({ type: "success", title: "Agendamento salvo", message: `Backup automático a cada ${hours}h configurado.` });
+    } catch (err) {
+      showToast({ type: "error", title: "Erro", message: err.response?.data?.error || "Erro ao salvar agendamento." });
+    }
+  };
+
+  const handleDeleteSchedule = async () => {
+    const token = localStorage.getItem("token");
+    const inventoryId = backupSelectedInventoryId;
+    try {
+      await axios.delete(`${API}/backups/schedule`, { params: { inventoryId }, headers: { Authorization: `Bearer ${token}` } });
+      setBackupSchedule(null);
+      setScheduleIntervalInput("");
+      showToast({ type: "success", title: "Agendamento removido", message: "Backup automático desativado." });
+    } catch {
+      showToast({ type: "error", title: "Erro", message: "Não foi possível remover o agendamento." });
+    }
+  };
+
+  const handleDownloadBackup = (record) => {
+    const token = localStorage.getItem("token");
+    const inventoryId = backupSelectedInventoryId;
+    const url = `${API}/backups/${record.id}/download?inventoryId=${inventoryId}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.setAttribute("download", record.fileName);
+    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.blob())
+      .then((blob) => {
+        const objUrl = URL.createObjectURL(blob);
+        a.href = objUrl;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(objUrl);
+      })
+      .catch(() => showToast({ type: "error", title: "Erro", message: "Não foi possível baixar o backup." }));
+  };
+
+  const handleRestoreBackup = async (id) => {
+    const token = localStorage.getItem("token");
+    const inventoryId = backupSelectedInventoryId;
+    try {
+      await axios.post(`${API}/backups/${id}/restore`, { inventoryId }, { headers: { Authorization: `Bearer ${token}` } });
+      showToast({ type: "success", title: "Restauração concluída", message: "Backup de segurança criado e inventário restaurado com sucesso." });
+      await loadBackupData();
+    } catch (err) {
+      showToast({ type: "error", title: "Erro na restauração", message: err.response?.data?.error || "Falha ao restaurar." });
+    } finally {
+      setBackupConfirmAction(null);
+      setBackupRestoreId(null);
+    }
+  };
+
+  const handleDeleteBackup = async (id) => {
+    const token = localStorage.getItem("token");
+    const inventoryId = backupSelectedInventoryId;
+    try {
+      await axios.delete(`${API}/backups/${id}`, { params: { inventoryId }, headers: { Authorization: `Bearer ${token}` } });
+      setBackupList((prev) => prev.filter((r) => r.id !== id));
+      showToast({ type: "success", title: "Backup removido", message: "Arquivo excluído com sucesso." });
+    } catch {
+      showToast({ type: "error", title: "Erro", message: "Não foi possível excluir o backup." });
+    } finally {
+      setBackupConfirmAction(null);
+      setBackupDeleteId(null);
+    }
+  };
+
+  const abbreviateName = (name) => {
+    if (!name) return "usuário não identificado";
+    const parts = name.trim().split(/\s+/);
+    if (parts.length <= 1) return name;
+    return parts[0] + " " + parts.slice(1).map((p) => p[0].toUpperCase() + ".").join(" ");
+  };
+
+  const getSpacePhaseBadges = (space) => {
+    const badges = [];
+
+    if (space.startedAt || space.executionStatus === "INICIADO" || space.executionStatus === "FINALIZADO") {
+      const date = space.startedAt ? new Date(space.startedAt).toLocaleDateString("pt-BR") : "--/--/--";
+      badges.push({ label: `🟠 Iniciado em ${date} por ${abbreviateName(space.startedBy)}`, className: "bg-amber-100 text-amber-800" });
+    }
+
     if (space.isFinalized || space.executionStatus === "FINALIZADO") {
-      const date = fmtDate(space.finalizedAt || space.startedAt);
-      const by =
-        space.finalizedBy || space.startedBy || "usuário não identificado";
-      return {
-        label: `🟢 Finalizado em ${date} por ${by}`,
-        className: "bg-emerald-100 text-emerald-800",
-      };
+      badges.push({ label: `🟢 Finalizado em ${fmtDate(space.finalizedAt)} por ${abbreviateName(space.finalizedBy)}`, className: "bg-emerald-100 text-emerald-800" });
     }
 
-    if (space.startedAt || space.executionStatus === "INICIADO") {
-      const startedLabel = space.startedAt
-        ? new Date(space.startedAt).toLocaleDateString("pt-BR")
-        : "--/--/--";
-      const startedBy = space.startedBy || "usuário não identificado";
-
-      return {
-        label: `🟠 Iniciado em ${startedLabel} por ${startedBy}`,
-        className: "bg-amber-100 text-amber-800",
-      };
+    if (space.isVerified && space.confirmedBy) {
+      badges.push({ label: `🟣 Confirmado em ${fmtDate(space.confirmedAt)} por ${abbreviateName(space.confirmedBy)}`, className: "bg-purple-100 text-purple-800" });
     }
 
-    return {
-      label: "🔴 Não iniciado",
-      className: "bg-rose-100 text-rose-800",
-    };
+    if (badges.length === 0) {
+      badges.push({ label: "🔴 Não iniciado", className: "bg-rose-100 text-rose-800" });
+    }
+
+    return badges;
   };
 
   const activeTabMeta = useMemo(
@@ -380,8 +554,19 @@ export default function DashboardPage() {
         // fire-and-forget load of the summary when switching to the tab
         loadDashboardSummary(token, localStorage.getItem("activeInventoryId"));
       }
+
+      if (activeTab === "backups") {
+        loadBackupInventories(activeInventory?.id);
+      }
     }
   }, [activeTab, visibleTabs, unfoundSubTab]);
+
+  // Reload backup data whenever the selected inventory changes
+  useEffect(() => {
+    if (activeTab === "backups" && backupSelectedInventoryId) {
+      loadBackupData(backupSelectedInventoryId);
+    }
+  }, [backupSelectedInventoryId]);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -592,6 +777,8 @@ export default function DashboardPage() {
             naoLocalizadoHistory?.createdBy || item.conferente || "-",
           marcadoEm:
             naoLocalizadoHistory?.createdAt || item.dataUltimaAlteracao,
+          marcadoOnde:
+            naoLocalizadoHistory?.fromSpaceName || item.ultimoLocalConhecido || null,
         };
       });
 
@@ -653,7 +840,8 @@ export default function DashboardPage() {
   const handleUnfoundItemAction = async (
     item,
     action,
-    condicao = "EXCELENTE",
+    condicao = "BOM",
+    targetSpaceId,
   ) => {
     if (!item || !action) return;
 
@@ -662,37 +850,36 @@ export default function DashboardPage() {
       const token = localStorage.getItem("token");
       const inventoryId = localStorage.getItem("activeInventoryId");
 
-      if (action === "encontrado") {
-        // Marcar como encontrado
+      if (action === "mover") {
+        if (!targetSpaceId) {
+          showToast({ type: "error", title: "Sala obrigatória", message: "Selecione a sala de destino." });
+          return;
+        }
+        await axios.post(
+          `${API}/items/relocate`,
+          { itemId: item.id, targetSpaceId, inventoryId },
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        // Record visual condition via check (marks item as PENDENTE in target space)
         await axios.post(
           `${API}/items/${item.id}/check`,
-          {
-            statusEncontrado: "SIM",
-            condicaoVisual: condicao,
-          },
-          {
-            headers: { Authorization: `Bearer ${token}` },
-            params: { inventoryId },
-          },
+          { itemId: item.id, condicao, inventoryId },
+          { headers: { Authorization: `Bearer ${token}` }, params: { inventoryId } },
         );
-
         showToast({
           type: "success",
-          title: "Item marcado como encontrado",
-          message: `Patrimônio #${item.patrimonio} atualizado com sucesso.`,
+          title: "Item movido",
+          message: `Patrimônio #${item.patrimonio} realocado com sucesso.`,
         });
-
-        // Recarregar itens não localizados
         setUnfoundActionModal(null);
+        setUnfoundMoveTargetSpaceId("");
         await loadUnfoundItems(token);
       }
     } catch (err) {
       showToast({
         type: "error",
-        title: "Falha ao atualizar item",
-        message:
-          err.response?.data?.error ||
-          "Não foi possível atualizar o status do item.",
+        title: "Falha ao mover item",
+        message: err.response?.data?.error || "Não foi possível mover o item.",
       });
     } finally {
       setSavingUnfoundAction(false);
@@ -1366,7 +1553,7 @@ export default function DashboardPage() {
         ) : activeTab === "espacos" ? (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {sortedSpaces.map((space) => {
-              const executionStatus = formatSpaceExecutionStatus(space);
+              const phaseBadges = getSpacePhaseBadges(space);
               return (
                 <div
                   key={space.id}
@@ -1407,17 +1594,14 @@ export default function DashboardPage() {
                     </div>
 
                     <div className="mb-4 flex flex-col gap-1">
-                      <span
-                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${executionStatus.className}`}
-                      >
-                        {executionStatus.label}
-                      </span>
-                      {space.isVerified && space.confirmedBy && (
-                        <span className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold bg-purple-100 text-purple-800">
-                          🟣 Confirmado em {fmtDate(space.confirmedAt)} por{" "}
-                          {space.confirmedBy}
+                      {phaseBadges.map((badge, i) => (
+                        <span
+                          key={i}
+                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${badge.className}`}
+                        >
+                          {badge.label}
                         </span>
-                      )}
+                      ))}
                     </div>
 
                     <div className="space-y-2 mb-6">
@@ -1942,9 +2126,14 @@ export default function DashboardPage() {
                                 {item.descricao}
                               </p>
                               <p className="text-xs text-slate-500 mt-1">
-                                Localização:{" "}
-                                {item.space?.name || "Sem informação"}
+                                📍 {item.space?.name || "Localização não informada"}
                               </p>
+                              {item.marcadoPorQuem && item.marcadoPorQuem !== "-" && (
+                                <p className="text-xs text-rose-600 mt-0.5">
+                                  Não localizado por {abbreviateName(item.marcadoPorQuem)}
+                                  {item.marcadoOnde ? ` em ${item.marcadoOnde}` : ""}
+                                </p>
+                              )}
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
                               <span className="rounded-full px-2 py-0.5 text-xs font-semibold bg-rose-100 text-rose-700">
@@ -1993,30 +2182,16 @@ export default function DashboardPage() {
                                 </div>
                               </div>
 
-                              <div className="mt-4 pt-4 border-t border-slate-200 flex gap-2">
+                              <div className="mt-4 pt-4 border-t border-slate-200">
                                 <button
-                                  onClick={() =>
-                                    setUnfoundActionModal({
-                                      item,
-                                      action: "encontrado",
-                                    })
-                                  }
-                                  className="flex-1 px-3 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition"
+                                  onClick={() => {
+                                    setUnfoundCondicao("BOM");
+                                    setUnfoundMoveTargetSpaceId("");
+                                    setUnfoundActionModal({ item, action: "mover" });
+                                  }}
+                                  className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition"
                                 >
-                                  ✅ Encontrado
-                                </button>
-                                <button
-                                  onClick={() =>
-                                    showToast({
-                                      type: "info",
-                                      title: "Recurso em desenvolvimento",
-                                      message:
-                                        "A funcionalidade de mover está em desenvolvimento.",
-                                    })
-                                  }
-                                  className="flex-1 px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition"
-                                >
-                                  ➡️ Mover
+                                  ➡️ Mover para outra sala
                                 </button>
                               </div>
                             </div>
@@ -2388,6 +2563,221 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 ) : null}
+
+                {activeTab === "backups" ? (
+                  <div className="space-y-6">
+
+                    {/* Inventory selector — only shown when the user manages more than one inventory */}
+                    {backupInventories.length > 1 && (
+                      <div className="rounded-xl border border-slate-200 p-5">
+                        <h3 className="text-sm font-semibold text-slate-800 mb-3">📦 Inventário</h3>
+                        <select
+                          value={backupSelectedInventoryId || ""}
+                          onChange={(e) => {
+                            setBackupList([]);
+                            setBackupSchedule(null);
+                            setBackupLockStatus(null);
+                            setBackupSelectedInventoryId(e.target.value);
+                          }}
+                          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        >
+                          {backupInventories.map((inv) => (
+                            <option key={inv.id} value={inv.id}>
+                              {inv.name}{inv.campus ? ` — ${inv.campus}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {/* Lock status banner */}
+                    {backupLockStatus?.locked && (
+                      <div className="flex items-center gap-3 rounded-xl border border-orange-300 bg-orange-50 p-4">
+                        <span className="text-xl">🔒</span>
+                        <div>
+                          <p className="text-sm font-semibold text-orange-900">
+                            Sistema bloqueado — {backupLockStatus.lock?.reason === "BACKUP" ? "Backup" : "Restauração"} em andamento
+                          </p>
+                          <p className="text-xs text-orange-700 mt-0.5">
+                            Alterações no inventário estão temporariamente bloqueadas. Aguarde a conclusão.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Manual backup */}
+                    <div className="rounded-xl border border-slate-200 p-5">
+                      <h3 className="text-sm font-semibold text-slate-800 mb-1">🗄️ Criar backup manual</h3>
+                      <p className="text-xs text-slate-500 mb-4">
+                        Gera um arquivo SQL com o estado atual do inventário. O sistema ficará bloqueado para alterações durante a geração.
+                      </p>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={backupLabelInput}
+                          onChange={(e) => setBackupLabelInput(e.target.value)}
+                          placeholder="Descrição opcional (ex: antes da auditoria)"
+                          className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleCreateBackup}
+                          disabled={backupLoading || backupLockStatus?.locked}
+                          className="shrink-0 rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-900 disabled:opacity-50"
+                        >
+                          {backupLoading ? "Gerando..." : "Gerar backup"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Scheduled backup */}
+                    <div className="rounded-xl border border-slate-200 p-5">
+                      <h3 className="text-sm font-semibold text-slate-800 mb-1">🕒 Backup automático</h3>
+                      <p className="text-xs text-slate-500 mb-4">
+                        O sistema criará backups automaticamente no intervalo configurado.
+                      </p>
+                      {backupSchedule ? (
+                        <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 mb-3 flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-semibold text-emerald-800">
+                              ✅ Ativo — a cada {backupSchedule.intervalHours}h
+                            </p>
+                            <p className="text-xs text-emerald-700 mt-0.5">
+                              Último: {backupSchedule.lastRunAt ? fmtDateTime(backupSchedule.lastRunAt) : "ainda não executou"} •{" "}
+                              Próximo: {fmtDateTime(backupSchedule.nextRunAt)}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleDeleteSchedule}
+                            className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                          >
+                            Desativar
+                          </button>
+                        </div>
+                      ) : null}
+                      <div className="flex gap-2 items-center">
+                        <input
+                          type="number"
+                          min="1"
+                          value={scheduleIntervalInput}
+                          onChange={(e) => setScheduleIntervalInput(e.target.value)}
+                          placeholder="Intervalo em horas (ex: 12)"
+                          className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleSaveSchedule}
+                          className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700"
+                        >
+                          {backupSchedule ? "Atualizar intervalo" : "Ativar agendamento"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Backup list */}
+                    <div className="rounded-xl border border-slate-200 p-5">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-semibold text-slate-800">📋 Backups realizados</h3>
+                        <button
+                          type="button"
+                          onClick={loadBackupData}
+                          className="text-xs text-sky-600 hover:underline"
+                        >
+                          Atualizar
+                        </button>
+                      </div>
+
+                      {backupListLoading ? (
+                        <p className="text-sm text-slate-400">Carregando...</p>
+                      ) : backupList.length === 0 ? (
+                        <p className="text-sm text-slate-400">Nenhum backup encontrado.</p>
+                      ) : (
+                        <div className="overflow-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b border-slate-200 text-left text-xs text-slate-500">
+                                <th className="pb-2 pr-4">Data / Hora</th>
+                                <th className="pb-2 pr-4">Descrição</th>
+                                <th className="pb-2 pr-4">Criado por</th>
+                                <th className="pb-2 pr-4">Tamanho</th>
+                                <th className="pb-2 pr-4">Tipo</th>
+                                <th className="pb-2 pr-4">Status</th>
+                                <th className="pb-2">Ações</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {backupList.map((record) => (
+                                <tr key={record.id} className="align-middle">
+                                  <td className="py-2.5 pr-4 whitespace-nowrap text-slate-700">
+                                    {fmtDateTime(record.createdAt)}
+                                  </td>
+                                  <td className="py-2.5 pr-4 text-slate-600 max-w-[180px] truncate">
+                                    {record.label || <span className="text-slate-400 italic">—</span>}
+                                  </td>
+                                  <td className="py-2.5 pr-4 text-slate-600 whitespace-nowrap">
+                                    {abbreviateName(record.createdBy)}
+                                  </td>
+                                  <td className="py-2.5 pr-4 text-slate-600 whitespace-nowrap">
+                                    {fmtBytes(record.fileSizeBytes)}
+                                  </td>
+                                  <td className="py-2.5 pr-4">
+                                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${record.isScheduled ? "bg-blue-100 text-blue-700" : "bg-slate-100 text-slate-700"}`}>
+                                      {record.isScheduled ? "Automático" : "Manual"}
+                                    </span>
+                                  </td>
+                                  <td className="py-2.5 pr-4">
+                                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${
+                                      record.status === "COMPLETED" ? "bg-emerald-100 text-emerald-700"
+                                      : record.status === "FAILED" ? "bg-red-100 text-red-700"
+                                      : "bg-amber-100 text-amber-700"
+                                    }`}>
+                                      {record.status === "COMPLETED" ? "✓ Concluído"
+                                        : record.status === "FAILED" ? "✗ Falha"
+                                        : "⏳ Em andamento"}
+                                    </span>
+                                  </td>
+                                  <td className="py-2.5">
+                                    <div className="flex gap-1.5">
+                                      {record.status === "COMPLETED" && (
+                                        <>
+                                          <button
+                                            type="button"
+                                            title="Baixar SQL"
+                                            onClick={() => handleDownloadBackup(record)}
+                                            className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                          >
+                                            ⬇ Baixar
+                                          </button>
+                                          <button
+                                            type="button"
+                                            title="Restaurar este backup"
+                                            onClick={() => { setBackupRestoreId(record.id); setBackupConfirmAction("restore"); }}
+                                            className="rounded-lg border border-amber-300 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-50"
+                                          >
+                                            ↩ Restaurar
+                                          </button>
+                                        </>
+                                      )}
+                                      <button
+                                        type="button"
+                                        title="Excluir backup"
+                                        onClick={() => { setBackupDeleteId(record.id); setBackupConfirmAction("delete"); }}
+                                        className="rounded-lg border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
+                                      >
+                                        🗑
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
@@ -2577,7 +2967,7 @@ export default function DashboardPage() {
       <Modal
         isOpen={!!unfoundActionModal}
         onClose={() => setUnfoundActionModal(null)}
-        title="Marcar item como encontrado"
+        title="Mover item para outra sala"
         size="md"
       >
         <ModalBody>
@@ -2592,34 +2982,48 @@ export default function DashboardPage() {
             </div>
 
             <div>
-              <p className="mb-3 text-sm font-semibold text-slate-700">
-                Estado de conservação:
+              <p className="mb-2 text-sm font-semibold text-slate-700">
+                Sala de destino:
               </p>
-              <div className="space-y-2">
-                {["EXCELENTE", "BOM", "INSERVIVEL"].map((status) => (
+              <select
+                value={unfoundMoveTargetSpaceId}
+                onChange={(e) => setUnfoundMoveTargetSpaceId(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              >
+                <option value="">Selecione uma sala...</option>
+                {spaces
+                  .filter((s) => s.id !== unfoundActionModal?.item?.spaceId && !s.isFinalized)
+                  .map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+              </select>
+            </div>
+
+            <div>
+              <p className="mb-2 text-sm font-semibold text-slate-700">
+                Condição visual:
+              </p>
+              <div className="flex gap-2">
+                {[["BOM", "🟢 Bom"], ["REGULAR", "🟡 Regular"], ["RUIM", "🔴 Ruim"]].map(([val, label]) => (
                   <button
-                    key={status}
-                    onClick={() => setUnfoundCondicao(status)}
-                    className={`w-full py-2 px-3 rounded-lg font-medium text-sm transition ${
-                      unfoundCondicao === status
+                    key={val}
+                    type="button"
+                    onClick={() => setUnfoundCondicao(val)}
+                    className={`flex-1 py-2 px-2 rounded-lg font-medium text-xs transition ${
+                      unfoundCondicao === val
                         ? "bg-blue-600 text-white"
                         : "bg-slate-100 text-slate-700 hover:bg-slate-200"
                     }`}
                   >
-                    {status === "EXCELENTE"
-                      ? "🟢 Excelente"
-                      : status === "BOM"
-                        ? "🟡 Bom"
-                        : "🔴 Inservível"}
+                    {label}
                   </button>
                 ))}
               </div>
             </div>
 
-            <div className="rounded-lg bg-blue-50 p-3 border border-blue-200">
-              <p className="text-xs text-blue-800">
-                O item será marcado como encontrado com a condição visual
-                selecionada.
+            <div className="rounded-lg bg-amber-50 p-3 border border-amber-200">
+              <p className="text-xs text-amber-800">
+                O item será movido para a sala selecionada e ficará aguardando confirmação na sala de destino.
               </p>
             </div>
           </div>
@@ -2634,19 +3038,68 @@ export default function DashboardPage() {
             Cancelar
           </button>
           <button
+            type="button"
             onClick={() => {
               if (unfoundActionModal?.item) {
                 handleUnfoundItemAction(
                   unfoundActionModal.item,
                   unfoundActionModal.action,
                   unfoundCondicao,
+                  unfoundMoveTargetSpaceId,
                 );
               }
             }}
-            disabled={savingUnfoundAction}
-            className="rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+            disabled={savingUnfoundAction || !unfoundMoveTargetSpaceId}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            {savingUnfoundAction ? "Salvando..." : "Confirmar"}
+            {savingUnfoundAction ? "Movendo..." : "Confirmar mover"}
+          </button>
+        </ModalFooter>
+      </Modal>
+
+      {/* Backup confirmation modal (restore / delete) */}
+      <Modal
+        isOpen={!!backupConfirmAction}
+        onClose={() => { setBackupConfirmAction(null); setBackupRestoreId(null); setBackupDeleteId(null); }}
+        title={backupConfirmAction === "restore" ? "Confirmar restauração" : "Confirmar exclusão"}
+        size="sm"
+      >
+        <ModalBody>
+          {backupConfirmAction === "restore" ? (
+            <div>
+              <p className="text-sm text-slate-700 mb-3">
+                <strong>Atenção:</strong> Esta operação irá <strong>substituir todos os dados atuais</strong> do inventário pelo conteúdo deste backup.
+              </p>
+              <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 mb-3">
+                <p className="text-xs text-blue-800 font-semibold">🛡️ Salvaguarda automática: antes de restaurar, o sistema criará automaticamente um backup do estado atual, garantindo que nenhum dado seja perdido sem possibilidade de recuperação.</p>
+              </div>
+              <div className="rounded-lg bg-amber-50 border border-amber-200 p-3">
+                <p className="text-xs text-amber-800 font-semibold">O sistema ficará bloqueado para alterações durante o processo de backup de segurança e restauração.</p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-slate-700">
+              O arquivo SQL será excluído permanentemente e não poderá ser recuperado.
+            </p>
+          )}
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => { setBackupConfirmAction(null); setBackupRestoreId(null); setBackupDeleteId(null); }}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (backupConfirmAction === "restore" && backupRestoreId) handleRestoreBackup(backupRestoreId);
+              if (backupConfirmAction === "delete" && backupDeleteId) handleDeleteBackup(backupDeleteId);
+            }}
+            className={`rounded-lg px-4 py-2 text-sm font-semibold text-white ${backupConfirmAction === "restore" ? "bg-amber-600 hover:bg-amber-700" : "bg-red-600 hover:bg-red-700"}`}
+          >
+            {backupConfirmAction === "restore" ? "Sim, restaurar" : "Sim, excluir"}
           </button>
         </ModalFooter>
       </Modal>

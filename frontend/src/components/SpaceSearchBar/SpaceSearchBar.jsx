@@ -88,7 +88,7 @@ export default function SpaceSearchBar({
         const token = tokenRef.current || localStorage.getItem("token");
         const inventoryId = localStorage.getItem("activeInventoryId");
         const { data } = await axios.get(`${API}/spaces/active`, {
-          params: { q: term, inventoryId },
+          params: { q: term, inventoryId, includeFinalized: "true" },
           headers: { Authorization: `Bearer ${token}` },
         });
         const ordered = [...data].sort((a, b) => {

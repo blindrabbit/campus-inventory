@@ -5,12 +5,12 @@ import { prisma } from "../prisma/client.js";
 
 const router = Router();
 
-function formatHistoryEntry(entry) {
+function formatHistoryEntry(entry, nameMap = {}) {
   return {
     id: entry.id,
     action: entry.action,
     reason: entry.reason,
-    createdBy: entry.createdBy,
+    createdBy: nameMap[entry.createdBy] || entry.createdBy,
     createdAt: entry.createdAt,
     metadata: entry.metadata,
     fromSpaceId: entry.fromSpaceId,
@@ -18,6 +18,16 @@ function formatHistoryEntry(entry) {
     fromSpaceName: entry.fromSpace?.name || null,
     toSpaceName: entry.toSpace?.name || null,
   };
+}
+
+async function buildNameMap(samAccountNames) {
+  const unique = [...new Set(samAccountNames.filter(Boolean))];
+  if (unique.length === 0) return {};
+  const users = await prisma.user.findMany({
+    where: { samAccountName: { in: unique } },
+    select: { samAccountName: true, fullName: true },
+  });
+  return Object.fromEntries(users.map((u) => [u.samAccountName, u.fullName]));
 }
 
 router.get(
@@ -91,6 +101,13 @@ router.get(
       const start = (page - 1) * limit;
       const paginatedItems = filtered.slice(start, start + limit);
 
+      // Resolve samAccountNames → fullName in a single query
+      const allSamAccounts = paginatedItems.flatMap((item) => [
+        item.ultimoConferente,
+        ...item.history.map((h) => h.createdBy),
+      ]);
+      const nameMap = await buildNameMap(allSamAccounts);
+
       res.json({
         items: paginatedItems.map((item) => {
           const latestHistory = item.history[0];
@@ -101,6 +118,8 @@ router.get(
               ? "NAO_ENCONTRADO"
               : item.statusEncontrado;
 
+          const conferenteSam = item.ultimoConferente || latestHistory?.createdBy || null;
+
           return {
             id: item.id,
             patrimonio: item.patrimonio,
@@ -110,13 +129,11 @@ router.get(
               item.dataConferencia ||
               latestHistory?.createdAt ||
               item.updatedAt,
-            ultimoResponsavel:
-              item.ultimoConferente || latestHistory?.createdBy || null,
+            ultimoResponsavel: nameMap[conferenteSam] || conferenteSam || null,
             ultimoLocalConhecido: item.space?.name || null,
             ultimoLocalConhecidoId: item.spaceId,
-            conferente:
-              item.ultimoConferente || latestHistory?.createdBy || null,
-            historicoLocalizacoes: item.history.map(formatHistoryEntry),
+            conferente: nameMap[conferenteSam] || conferenteSam || null,
+            historicoLocalizacoes: item.history.map((h) => formatHistoryEntry(h, nameMap)),
           };
         }),
         pagination: {

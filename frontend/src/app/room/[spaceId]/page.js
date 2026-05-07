@@ -87,7 +87,7 @@ export default function RoomPage() {
   const [relocateSearchTerm, setRelocateSearchTerm] = useState("");
   const [batchStartPatrimonio, setBatchStartPatrimonio] = useState("");
   const [batchEndPatrimonio, setBatchEndPatrimonio] = useState("");
-  const [batchCondicao, setBatchCondicao] = useState("EXCELENTE");
+  const [batchCondicao, setBatchCondicao] = useState("BOM");
   const [batchPreview, setBatchPreview] = useState(null);
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
@@ -123,6 +123,7 @@ export default function RoomPage() {
   const [reopenJustification, setReopenJustification] = useState("");
   const verificationInitiatedRef = useRef(false);
   const [inventoryRole, setInventoryRole] = useState(null);
+  const isViewer = inventoryRole === "VISUALIZADOR";
 
   // SSE — listen for realtime events from other users in this space
   const currentInventoryId =
@@ -252,34 +253,16 @@ export default function RoomPage() {
     return new Date(value).toLocaleString("pt-BR");
   };
 
-  const getSpaceStartBadge = (spaceData) => {
-    // Sala verificada e fechada definitivamente pelo revisor
-    if (spaceData?.isVerifiedByRevisor) {
-      const date = spaceData?.finalizedAt || spaceData?.startedAt;
-      const label = date ? new Date(date).toLocaleDateString("pt-BR") : "--/--/--";
-      return {
-        label: `🟣 Verificado pelo revisor em ${label}`,
-        className: "bg-purple-100 text-purple-800",
-      };
-    }
+  const abbreviateName = (name) => {
+    if (!name) return "usuário não identificado";
+    const parts = name.trim().split(/\s+/);
+    if (parts.length <= 1) return name;
+    return parts[0] + " " + parts.slice(1).map((p) => p[0].toUpperCase() + ".").join(" ");
+  };
 
-    // Verificar se está finalizado pelo conferente
-    if (spaceData?.isFinalized) {
-      const date = spaceData?.finalizedAt || spaceData?.startedAt;
-      const finalizedLabel = date
-        ? new Date(date).toLocaleDateString("pt-BR")
-        : "--/--/--";
-      const finalizedBy =
-        spaceData?.finalizedBy ||
-        spaceData?.startedByDisplay ||
-        spaceData?.startedBy ||
-        "usuário não identificado";
-
-      return {
-        label: `🟢 Finalizado em ${finalizedLabel} por ${finalizedBy}`,
-        className: "bg-emerald-100 text-emerald-800",
-      };
-    }
+  const getSpacePhaseBadges = (spaceData) => {
+    const fmtD = (v) => v ? new Date(v).toLocaleDateString("pt-BR") : "--/--/--";
+    const badges = [];
 
     const wasStarted =
       Boolean(spaceData?.startedAt) ||
@@ -287,24 +270,38 @@ export default function RoomPage() {
       spaceData?.executionStatus === "FINALIZADO";
 
     if (wasStarted) {
-      const startedLabel = spaceData?.startedAt
-        ? new Date(spaceData.startedAt).toLocaleDateString("pt-BR")
-        : "--/--/--";
-      const startedBy =
-        spaceData?.startedByDisplay ||
-        spaceData?.startedBy ||
-        "usuário não identificado";
-
-      return {
-        label: `🟠 Iniciado em ${startedLabel} por ${startedBy}`,
+      badges.push({
+        label: `🟠 Iniciado em ${fmtD(spaceData?.startedAt)} por ${abbreviateName(spaceData?.startedByDisplay || spaceData?.startedBy)}`,
         className: "bg-amber-100 text-amber-800",
-      };
+      });
     }
 
-    return {
-      label: "🔴 Não iniciado",
-      className: "bg-rose-100 text-rose-700",
-    };
+    if (spaceData?.isFinalized) {
+      badges.push({
+        label: `🟢 Finalizado em ${fmtD(spaceData?.finalizedAt)} por ${abbreviateName(spaceData?.finalizedBy)}`,
+        className: "bg-emerald-100 text-emerald-800",
+      });
+    }
+
+    if (spaceData?.isVerifiedByRevisor) {
+      badges.push({
+        label: `🔵 Verificado pelo revisor em ${fmtD(spaceData?.finalizedAt || spaceData?.startedAt)}`,
+        className: "bg-blue-100 text-blue-800",
+      });
+    }
+
+    if (spaceData?.isVerified && spaceData?.confirmedBy) {
+      badges.push({
+        label: `🟣 Confirmado em ${fmtD(spaceData?.confirmedAt)} por ${abbreviateName(spaceData?.confirmedBy)}`,
+        className: "bg-purple-100 text-purple-800",
+      });
+    }
+
+    if (badges.length === 0) {
+      badges.push({ label: "🔴 Não iniciado", className: "bg-rose-100 text-rose-700" });
+    }
+
+    return badges;
   };
 
   const getDirectionBadgeClass = (direction) => {
@@ -1049,7 +1046,7 @@ export default function RoomPage() {
           title: "Item confirmado na sala",
           message: "O item já estava nesta sala e foi confirmado.",
         });
-        handleCheck(candidate.id, candidate.condicaoVisual || "EXCELENTE");
+        handleCheck(candidate.id, candidate.condicaoVisual || "BOM");
         return;
       }
 
@@ -1170,7 +1167,7 @@ export default function RoomPage() {
         method: "POST",
         payload: {
           itemId: item.id,
-          condicao: item.condicaoVisual || "EXCELENTE",
+          condicao: item.condicaoVisual || "BOM",
           inventoryId,
           connectionId,
         },
@@ -1182,7 +1179,7 @@ export default function RoomPage() {
           ? {
               ...i,
               statusEncontrado: "SIM",
-              condicaoVisual: i.condicaoVisual || "EXCELENTE",
+              condicaoVisual: i.condicaoVisual || "BOM",
               meta: { ...i.meta, isRelocated: false },
             }
           : i,
@@ -1514,7 +1511,7 @@ export default function RoomPage() {
             100,
         )
       : 0;
-  const startBadge = getSpaceStartBadge(space);
+  const phaseBadges = getSpacePhaseBadges(space);
   const hasStateFilters =
     !showFoundItems ||
     !showRelocatedItems ||
@@ -1537,20 +1534,14 @@ export default function RoomPage() {
                 Resp: {space.responsibleDisplay || space.responsible}
               </p>
               <div className="mt-1 sm:mt-2 flex flex-wrap gap-1">
-                <span
-                  className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold sm:px-2.5 sm:py-1 ${startBadge.className}`}
-                >
-                  {startBadge.label}
-                </span>
-                {space.isVerified && space.confirmedBy && (
-                  <span className="hidden sm:inline-flex rounded-full px-2.5 py-1 text-xs font-semibold bg-purple-100 text-purple-800">
-                    🟣 Confirmado em{" "}
-                    {space.confirmedAt
-                      ? new Date(space.confirmedAt).toLocaleDateString("pt-BR")
-                      : "--/--/--"}{" "}
-                    por {space.confirmedBy}
+                {phaseBadges.map((badge, i) => (
+                  <span
+                    key={i}
+                    className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold sm:px-2.5 sm:py-1 ${badge.className}`}
+                  >
+                    {badge.label}
                   </span>
-                )}
+                ))}
               </div>
             </div>
             <button
@@ -1821,7 +1812,7 @@ export default function RoomPage() {
           </>
         ) : null}
 
-        {activeTab === "itens" ? (
+        {!isViewer && activeTab === "itens" ? (
           <div className="bg-white rounded-xl shadow p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -2007,9 +1998,9 @@ export default function RoomPage() {
                       onChange={(e) => setBatchCondicao(e.target.value)}
                       className="border rounded-lg px-3 py-2"
                     >
-                      <option value="EXCELENTE">🟢 Ótimo</option>
-                      <option value="BOM">🟡 Regular</option>
-                      <option value="INSERVIVEL">🔴 Ruim</option>
+                      <option value="BOM">🟢 Bom</option>
+                      <option value="REGULAR">🟡 Regular</option>
+                      <option value="RUIM">🔴 Ruim</option>
                     </select>
                   )}
                   {batchAction === "move" && (
@@ -2325,7 +2316,7 @@ export default function RoomPage() {
                           </p>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
-                          {!allFound && (
+                          {!isViewer && !allFound && (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -2341,7 +2332,7 @@ export default function RoomPage() {
                                     method: "POST",
                                     payload: {
                                       itemId: i.id,
-                                      condicao: i.condicaoVisual || "EXCELENTE",
+                                      condicao: i.condicaoVisual || "BOM",
                                       inventoryId,
                                       connectionId,
                                     },
@@ -2357,7 +2348,7 @@ export default function RoomPage() {
                                         ...i,
                                         statusEncontrado: "SIM",
                                         condicaoVisual:
-                                          i.condicaoVisual || "EXCELENTE",
+                                          i.condicaoVisual || "BOM",
                                         meta: { ...i.meta, isRelocated: false },
                                       };
                                     }
@@ -2377,7 +2368,7 @@ export default function RoomPage() {
                               ✅ Encontrar tudo
                             </button>
                           )}
-                          {relocatedCount > 0 && (
+                          {!isViewer && relocatedCount > 0 && (
                             <button
                               onClick={async (e) => {
                                 e.stopPropagation();
@@ -2392,7 +2383,7 @@ export default function RoomPage() {
                               ↩️ Desfazer movimentação
                             </button>
                           )}
-                          {allFound && (
+                          {!isViewer && allFound && (
                             <button
                               onClick={async (e) => {
                                 e.stopPropagation();
@@ -2524,7 +2515,7 @@ export default function RoomPage() {
                                           </span>
                                         )}
                                     </div>
-                                    <p className="text-gray-600 text-xs line-clamp-1">
+                                    <p className={`text-gray-600 text-xs ${expandedItem === item.id ? "" : "line-clamp-2"}`}>
                                       {item.descricao}
                                     </p>
                                   </div>
@@ -2587,7 +2578,8 @@ export default function RoomPage() {
                                                 ⚠️ Aguardando conferente
                                               </span>
                                             )
-                                            : (
+                                            : !isViewer
+                                              ? (
                                               <>
                                                 <button
                                                   onClick={(e) => {
@@ -2595,7 +2587,7 @@ export default function RoomPage() {
                                                     handleCheck(
                                                       item.id,
                                                       item.condicaoVisual ||
-                                                        "EXCELENTE",
+                                                        "BOM",
                                                     );
                                                   }}
                                                   className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-green-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-green-700 transition"
@@ -2638,7 +2630,7 @@ export default function RoomPage() {
                                                   </span>
                                                 </button>
                                               </>
-                                            ))}
+                                            ) : null)}
                                   </div>
                                 </div>
                               </div>
@@ -2647,12 +2639,6 @@ export default function RoomPage() {
                               {expandedItem === item.id && (
                                 <div className="px-4 pb-4 border-t pt-3">
                                   <div className="space-y-1.5 mb-4 text-sm text-gray-700">
-                                    <p>
-                                      <span className="font-semibold">
-                                        Descrição:
-                                      </span>{" "}
-                                      {item.descricao}
-                                    </p>
                                     <p>
                                       <span className="font-semibold">
                                         Valor:
@@ -2685,13 +2671,14 @@ export default function RoomPage() {
                                     </p>
                                   </div>
 
+                                  {!isViewer && (
                                   <div>
                                     <p className="mb-2 text-sm font-semibold text-gray-800">
                                       🎨 Estado de Conservação:
                                     </p>
                                     <div className="flex flex-wrap gap-2 mb-4">
-                                      {["EXCELENTE", "BOM", "INSERVIVEL"].map(
-                                        (status) => (
+                                      {[["BOM", "🟢 Bom"], ["REGULAR", "🟡 Regular"], ["RUIM", "🔴 Ruim"]].map(
+                                        ([status, label]) => (
                                           <button
                                             key={status}
                                             onClick={() =>
@@ -2703,17 +2690,15 @@ export default function RoomPage() {
                                                 : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                                             }`}
                                           >
-                                            {status === "EXCELENTE"
-                                              ? "🟢 Ótimo"
-                                              : status === "BOM"
-                                                ? "🟡 Regular"
-                                                : "🔴 Ruim"}
+                                            {label}
                                           </button>
                                         ),
                                       )}
                                     </div>
                                   </div>
+                                  )}
 
+                                  {!isViewer && (
                                   <button
                                     onClick={() => handleUndoLastAction(item)}
                                     disabled={saving || !canUndoAction}
@@ -2721,6 +2706,7 @@ export default function RoomPage() {
                                   >
                                     ↩️ Desfazer
                                   </button>
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -2791,49 +2777,61 @@ export default function RoomPage() {
                   </div>
                 )}
                 {/* Card Colapsado */}
-                <div className="p-5">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div
-                      className="flex-1 cursor-pointer"
-                      onClick={(e) => {
-                        if (selectionMode) return;
-                        e.stopPropagation();
-                        setExpandedItem(
-                          expandedItem === item.id ? null : item.id,
-                        );
-                      }}
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="font-bold text-lg">
-                          #{item.patrimonio}
+                <div className="p-4 lg:p-5">
+                  {/* Linha 1: patrimônio + descrição (clique para expandir) */}
+                  <div
+                    className="cursor-pointer mb-3"
+                    onClick={(e) => {
+                      if (selectionMode) return;
+                      e.stopPropagation();
+                      setExpandedItem(
+                        expandedItem === item.id ? null : item.id,
+                      );
+                    }}
+                  >
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      <span className="font-bold text-lg">
+                        #{item.patrimonio}
+                      </span>
+                      {item.verificationStatus ===
+                        "NAO_LOCALIZADO_VERIFICACAO" && (
+                        <span className="px-2 py-0.5 bg-red-200 text-red-800 text-xs rounded font-medium">
+                          ⚠️ Não localizado na verificação
                         </span>
-                        {item.verificationStatus ===
-                          "NAO_LOCALIZADO_VERIFICACAO" && (
-                          <span className="px-2 py-0.5 bg-red-200 text-red-800 text-xs rounded font-medium">
-                            ⚠️ Não localizado na verificação
+                      )}
+                      {item.meta?.isRelocated &&
+                        (item.meta?.wasUnfound ? (
+                          <span className="px-2 py-0.5 bg-orange-200 text-orange-800 text-xs rounded font-medium">
+                            🔍 Não localizado em {item.meta.fromSpaceName}
                           </span>
+                        ) : (
+                          <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
+                            ⚠️ Movido de {item.meta.fromSpaceName}
+                          </span>
+                        ))}
+                      {item.statusEncontrado === "SIM" &&
+                        !item.verificationStatus && (
+                          <span className="text-green-600 text-sm">✓</span>
                         )}
-                        {item.meta?.isRelocated &&
-                          (item.meta?.wasUnfound ? (
-                            <span className="px-2 py-0.5 bg-orange-200 text-orange-800 text-xs rounded font-medium">
-                              🔍 Não localizado em {item.meta.fromSpaceName}
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs rounded font-medium">
-                              ⚠️ Movido de {item.meta.fromSpaceName}
-                            </span>
-                          ))}
-                        {item.statusEncontrado === "SIM" &&
-                          !item.verificationStatus && (
-                            <span className="text-green-600 text-sm">✓</span>
-                          )}
-                      </div>
-                      <p className="text-gray-700 text-sm line-clamp-1">
-                        {item.descricao}
-                      </p>
                     </div>
+                    <p className={`text-gray-700 text-sm ${expandedItem === item.id ? "" : "line-clamp-2"}`}>
+                      {item.descricao}
+                    </p>
+                  </div>
 
-                    <div className="flex justify-between gap-2 md:gap-4 w-full mt-3">
+                  {/* Linha 2: botão expandir + botões de ação */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setExpandedItem(expandedItem === item.id ? null : item.id);
+                      }}
+                      className="shrink-0 flex items-center justify-center w-9 h-9 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-600 text-sm font-medium"
+                    >
+                      {expandedItem === item.id ? "▲" : "▼"}
+                    </button>
+                    <div className="flex flex-1 gap-2">
                       {!selectionMode &&
                         (item.verificationStatus === "REVERIFICAR" ||
                         verificationItems?.includes(item.id)
@@ -2878,14 +2876,15 @@ export default function RoomPage() {
                                   ⚠️ Aguardando conferente
                                 </span>
                               )
-                              : (
+                              : !isViewer
+                                ? (
                                 <>
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleCheck(
                                         item.id,
-                                        item.condicaoVisual || "EXCELENTE",
+                                        item.condicaoVisual || "BOM",
                                       );
                                     }}
                                     className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-green-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-green-700 transition"
@@ -2922,7 +2921,7 @@ export default function RoomPage() {
                                     <span className="md:hidden">🚫 N.Loc</span>
                                   </button>
                                 </>
-                              ))}
+                              ) : null)}
                     </div>
                   </div>
                 </div>
@@ -2931,10 +2930,6 @@ export default function RoomPage() {
                 {expandedItem === item.id && (
                   <div className="px-5 pb-5 border-t pt-4">
                     <div className="space-y-2 mb-5 text-sm text-gray-700">
-                      <p>
-                        <span className="font-semibold">Descrição:</span>{" "}
-                        {item.descricao}
-                      </p>
                       <p>
                         <span className="font-semibold">Valor:</span>{" "}
                         {formattedValue} |{" "}
@@ -2957,12 +2952,13 @@ export default function RoomPage() {
                       </p>
                     </div>
 
+                    {!isViewer && (
                     <div>
                       <p className="mb-2 text-sm font-semibold text-gray-800">
                         🎨 Estado de Conservação:
                       </p>
                       <div className="flex flex-wrap gap-3 mb-5">
-                        {["EXCELENTE", "BOM", "INSERVIVEL"].map((status) => (
+                        {[["BOM", "🟢 Bom"], ["REGULAR", "🟡 Regular"], ["RUIM", "🔴 Ruim"]].map(([status, label]) => (
                           <button
                             key={status}
                             onClick={() => handleCheck(item.id, status)}
@@ -2972,16 +2968,14 @@ export default function RoomPage() {
                                 : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                             }`}
                           >
-                            {status === "EXCELENTE"
-                              ? "🟢 Ótimo"
-                              : status === "BOM"
-                                ? "🟡 Regular"
-                                : "🔴 Ruim"}
+                            {label}
                           </button>
                         ))}
                       </div>
                     </div>
+                    )}
 
+                    {!isViewer && (
                     <div>
                       <p className="mb-2 text-sm font-semibold text-gray-800">
                         ⚙️ Ações:
@@ -2994,6 +2988,7 @@ export default function RoomPage() {
                         ↩️ Desfazer
                       </button>
                     </div>
+                    )}
                   </div>
                 )}
               </div>

@@ -42,6 +42,9 @@ model Inventory {
   users          InventoryUser[]
   statusHistory  InventoryStatusHistory[]
   itemGroups     ItemGroup[]
+  backupRecords  BackupRecord[]
+  backupSchedule BackupSchedule?
+  systemLock     SystemLock?
 
   @@map("inventories")
 }
@@ -236,4 +239,48 @@ model FinalizationHistory {
 
   @@index([spaceId])
   @@map("finalization_history")
+}
+
+model BackupRecord {
+  id          String   @id @default(cuid())
+  inventoryId String
+  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  createdBy   String
+  createdAt   DateTime @default(now())
+  label       String?
+  fileName    String
+  filePath    String
+  fileSizeBytes Int    @default(0)
+  status      String   @default("COMPLETED") // "IN_PROGRESS" | "COMPLETED" | "FAILED"
+  errorMessage String?
+  isScheduled Boolean  @default(false)
+
+  @@index([inventoryId, createdAt])
+  @@map("backup_records")
+}
+
+model BackupSchedule {
+  id            String    @id @default(cuid())
+  inventoryId   String    @unique
+  inventory     Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  intervalHours Int
+  isActive      Boolean   @default(true)
+  lastRunAt     DateTime?
+  nextRunAt     DateTime
+  createdBy     String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("backup_schedules")
+}
+
+model SystemLock {
+  id          String    @id @default(cuid())
+  inventoryId String    @unique
+  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  reason      String    // "BACKUP" | "RESTORE"
+  lockedBy    String
+  lockedAt    DateTime  @default(now())
+
+  @@map("system_locks")
 }
