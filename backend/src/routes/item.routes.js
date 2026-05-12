@@ -58,6 +58,16 @@ async function markSpaceStarted(prismaClient, { inventoryId, spaceId, user }) {
     }
     throw err;
   }
+
+  // Auto-transition inventory from NAO_INICIADO → EM_EXECUCAO on first activity
+  try {
+    await prismaClient.inventory.updateMany({
+      where: { id: inventoryId, statusOperacao: "NAO_INICIADO" },
+      data: { statusOperacao: "EM_EXECUCAO" },
+    });
+  } catch (_) {
+    // Non-critical: status stays as-is if this fails
+  }
 }
 
 router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {

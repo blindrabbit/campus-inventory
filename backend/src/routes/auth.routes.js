@@ -129,9 +129,15 @@ router.get("/inventory-role", async (req, res) => {
       select: { id: true, role: true },
     });
 
+    const inventory = await prisma.inventory.findUnique({
+      where: { id: inventoryId },
+      select: { statusOperacao: true },
+    });
+    const statusOperacao = inventory?.statusOperacao || null;
+
     // Global admins always get ADMIN_CICLO
     if (user?.role === "ADMIN") {
-      return res.json({ inventoryRole: "ADMIN_CICLO", inventoryId });
+      return res.json({ inventoryRole: "ADMIN_CICLO", inventoryId, statusOperacao });
     }
 
     // Look up inventory-specific role using the real DB id
@@ -152,6 +158,7 @@ router.get("/inventory-role", async (req, res) => {
     res.json({
       inventoryRole: role || "CONFERENTE",
       inventoryId,
+      statusOperacao,
     });
   } catch (err) {
     console.error("Error getting inventory role:", err);

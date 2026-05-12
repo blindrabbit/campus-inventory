@@ -211,8 +211,10 @@ export default function EstrategicoDashboardPage() {
 
   // ── Sorted locations ──────────────────────────────────────────────────────
   const sortedSpaces = [...(data?.spaces || [])].sort((a, b) => {
-    const rA = a.totalItems ? a.checkedCount / a.totalItems : 0;
-    const rB = b.totalItems ? b.checkedCount / b.totalItems : 0;
+    const actA = a.totalItems - (a.unfoundCount || 0);
+    const actB = b.totalItems - (b.unfoundCount || 0);
+    const rA = actA > 0 ? a.checkedCount / actA : a.totalItems > 0 ? 1 : 0;
+    const rB = actB > 0 ? b.checkedCount / actB : b.totalItems > 0 ? 1 : 0;
     if (locSort === "completionAsc")  return rA - rB;
     if (locSort === "completionDesc") return rB - rA;
     if (locSort === "totalDesc")      return b.totalItems - a.totalItems;
@@ -332,7 +334,8 @@ export default function EstrategicoDashboardPage() {
             className="relative h-[520px] mx-5 mb-5 rounded-xl overflow-hidden bg-slate-100"
           >
             {tiles.map((tile) => {
-              const rate = tile.totalItems > 0 ? tile.checkedCount / tile.totalItems : 0;
+              const tileActive = tile.totalItems - (tile.unfoundCount || 0);
+              const rate = tileActive > 0 ? tile.checkedCount / tileActive : tile.totalItems > 0 ? 1 : 0;
               const { bg, text } = completionColor(rate);
               const w = Math.max(tile.width - 2, 2);
               const h = Math.max(tile.height - 2, 2);
@@ -344,7 +347,7 @@ export default function EstrategicoDashboardPage() {
                 <div
                   key={tile.spaceId}
                   onClick={() => setSelectedTile(isSelected ? null : tile)}
-                  title={`${tile.name} — ${tile.checkedCount}/${tile.totalItems} (${Math.round(rate * 100)}%)`}
+                  title={`${tile.name} — ${tile.checkedCount}/${tileActive} (${Math.round(rate * 100)}%)`}
                   style={{
                     position: "absolute",
                     left:   tile.x + 1,
@@ -375,7 +378,7 @@ export default function EstrategicoDashboardPage() {
                         </p>
                         {showCnt && (
                           <p style={{ fontSize: 8, opacity: 0.75, marginTop: 2 }}>
-                            {tile.checkedCount}/{tile.totalItems}
+                            {tile.checkedCount}/{tileActive}
                           </p>
                         )}
                       </div>
@@ -390,7 +393,8 @@ export default function EstrategicoDashboardPage() {
         {/* ── Tile detail panel ────────────────────────────────────────────── */}
         {selectedTile && (() => {
           const t = selectedTile;
-          const rate = t.totalItems > 0 ? t.checkedCount / t.totalItems : 0;
+          const tActive = t.totalItems - (t.unfoundCount || 0);
+          const rate = tActive > 0 ? t.checkedCount / tActive : t.totalItems > 0 ? 1 : 0;
           const { bg } = completionColor(rate);
 
           const status = t.isVerifiedByRevisor
@@ -443,7 +447,7 @@ export default function EstrategicoDashboardPage() {
                 {/* metrics row */}
                 <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {[
-                    { label: "Total de itens",      value: t.totalItems,   color: "#475569" },
+                    { label: "Itens na sala",        value: tActive,        color: "#475569" },
                     { label: "Conferidos",           value: t.checkedCount, color: "#059669" },
                     { label: "Faltam conferir",      value: t.pendingCount, color: "#d97706" },
                     { label: "Não localizados",      value: t.unfoundCount, color: "#e11d48" },
@@ -578,7 +582,8 @@ export default function EstrategicoDashboardPage() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {sortedSpaces.map((sp) => {
-                  const rate = sp.totalItems > 0 ? sp.checkedCount / sp.totalItems : 0;
+                  const spActive = sp.totalItems - (sp.unfoundCount || 0);
+                  const rate = spActive > 0 ? sp.checkedCount / spActive : sp.totalItems > 0 ? 1 : 0;
                   const rateColor =
                     rate >= 1 ? "text-emerald-600" :
                     rate >= 0.5 ? "text-amber-600" : "text-rose-600";
@@ -601,7 +606,7 @@ export default function EstrategicoDashboardPage() {
                         <p className="truncate">{sp.name}</p>
                         {sp.sector && <p className="text-xs text-slate-400 truncate">{sp.sector}</p>}
                       </td>
-                      <td className="px-5 py-3 text-right text-slate-500">{sp.totalItems}</td>
+                      <td className="px-5 py-3 text-right text-slate-500">{spActive}</td>
                       <td className="px-5 py-3 text-right font-semibold text-emerald-600">{sp.checkedCount}</td>
                       <td className="px-5 py-3 text-right">
                         <span className={`font-bold ${rateColor}`}>{Math.round(rate * 100)}%</span>

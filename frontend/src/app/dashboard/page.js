@@ -27,8 +27,8 @@ const INVENTORY_STATUSES = [
 ];
 const STATUS_LABELS = {
   NAO_INICIADO: "Não iniciado",
-  EM_EXECUCAO: "Em execução",
-  PAUSADO: "Pausado",
+  EM_EXECUCAO: "Iniciado",
+  PAUSADO: "Suspenso",
   EM_AUDITORIA: "Em Auditoria",
   FINALIZADO: "Finalizado",
   CANCELADO: "Cancelado",
@@ -47,8 +47,12 @@ const DASHBOARD_TABS = [
     label: "Espaços",
   },
   {
-    id: "estrategico",
-    label: "Acompanhamento",
+    id: "nao-localizados",
+    label: "Não Localizados",
+  },
+  {
+    id: "criar-grupos",
+    label: "Criar Grupos",
   },
   {
     id: "usuarios",
@@ -57,14 +61,6 @@ const DASHBOARD_TABS = [
   {
     id: "dados",
     label: "Dados",
-  },
-  {
-    id: "criar-grupos",
-    label: "Criar Grupos",
-  },
-  {
-    id: "nao-localizados",
-    label: "Não Localizados",
   },
   {
     id: "backups",
@@ -595,7 +591,11 @@ export default function DashboardPage() {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (data.inventoryRole) {
-          const updated = { ...normalizedInventory, role: data.inventoryRole };
+          const updated = {
+            ...normalizedInventory,
+            role: data.inventoryRole,
+            ...(data.statusOperacao ? { statusOperacao: data.statusOperacao } : {}),
+          };
           localStorage.setItem("activeInventory", JSON.stringify(updated));
           setActiveInventory(updated);
         }
@@ -1377,40 +1377,48 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       {/* Header */}
       <header className="bg-white shadow-lg border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="space-y-4">
-              <div>
-                <h1 className="text-3xl font-bold text-gray-900">Inventário</h1>
-                <p className="text-sm text-gray-500 mt-1">
-                  Sistema de Conferência de Patrimônio
-                </p>
-                {activeInventory?.name ? (
-                  <div className="mt-2 inline-flex flex-col gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
-                    <p className="text-xs font-semibold text-sky-800">
-                      Inventário ativo: {activeInventory.name}
-                    </p>
-                    {activeInventory?.id ? (
-                      <p className="text-[11px] text-slate-500">
-                        ID: {activeInventory.id}
-                      </p>
-                    ) : null}
-                    <span
-                      className={`inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${
-                        STATUS_BADGE_STYLES[activeInventory?.statusOperacao] ||
-                        "bg-slate-100 text-slate-700 ring-slate-200"
-                      }`}
-                    >
-                      Status:{" "}
-                      {STATUS_LABELS[activeInventory?.statusOperacao] ||
-                        activeInventory?.statusOperacao ||
-                        "Não informado"}
-                    </span>
-                  </div>
-                ) : null}
-              </div>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="flex items-center justify-between gap-4">
+
+            {/* Left — title */}
+            <div className="shrink-0">
+              <h1 className="text-2xl font-bold text-gray-900">Inventário</h1>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Sistema de Conferência de Patrimônio
+              </p>
             </div>
-            <div className="flex items-center gap-4 self-start lg:self-auto">
+
+            {/* Center — active inventory card */}
+            {activeInventory?.name ? (
+              <div className="flex-1 flex justify-center">
+                <div className="inline-flex flex-col gap-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 min-w-0">
+                  <p className="text-xs font-semibold text-sky-800 truncate">
+                    Inventário ativo: {activeInventory.name}
+                  </p>
+                  {activeInventory?.id ? (
+                    <p className="text-[11px] text-slate-400 truncate">
+                      ID: {activeInventory.id}
+                    </p>
+                  ) : null}
+                  <span
+                    className={`inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${
+                      STATUS_BADGE_STYLES[activeInventory?.statusOperacao] ||
+                      "bg-slate-100 text-slate-700 ring-slate-200"
+                    }`}
+                  >
+                    Status:{" "}
+                    {STATUS_LABELS[activeInventory?.statusOperacao] ||
+                      activeInventory?.statusOperacao ||
+                      "Não informado"}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="flex-1" />
+            )}
+
+            {/* Right — user + actions */}
+            <div className="flex items-center gap-3 shrink-0">
               <div className="text-right">
                 <p className="text-sm font-semibold text-gray-800">
                   {user?.samAccountName} -{" "}
@@ -1433,6 +1441,7 @@ export default function DashboardPage() {
                 Sair
               </button>
             </div>
+
           </div>
         </div>
       </header>
@@ -1465,6 +1474,13 @@ export default function DashboardPage() {
               </div>
               {hasAuditAccess ? (
                 <div className="ml-auto flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => router.push("/dashboard/estrategico")}
+                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
+                  >
+                    Acompanhamento
+                  </button>
                   <button
                     type="button"
                     onClick={() => router.push("/admin/unfound-items")}
@@ -1510,6 +1526,13 @@ export default function DashboardPage() {
             </select>
             {hasAuditAccess ? (
               <div className="mt-3 flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => router.push("/dashboard/estrategico")}
+                  className="w-full rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
+                >
+                  Acompanhamento
+                </button>
                 <button
                   type="button"
                   onClick={() => router.push("/admin/unfound-items")}

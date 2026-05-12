@@ -9,11 +9,20 @@ const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 const STATUS_LABELS = {
   NAO_INICIADO: "Não iniciado",
-  EM_EXECUCAO: "Em execução",
-  PAUSADO: "Pausado",
+  EM_EXECUCAO: "Iniciado",
+  PAUSADO: "Suspenso",
   EM_AUDITORIA: "Em Auditoria",
   FINALIZADO: "Finalizado",
   CANCELADO: "Cancelado",
+};
+
+const STATUS_BADGE_STYLES = {
+  NAO_INICIADO: "bg-slate-100 text-slate-600 ring-slate-200",
+  EM_EXECUCAO:  "bg-emerald-100 text-emerald-700 ring-emerald-200",
+  PAUSADO:      "bg-amber-100 text-amber-700 ring-amber-200",
+  EM_AUDITORIA: "bg-sky-100 text-sky-700 ring-sky-200",
+  FINALIZADO:   "bg-indigo-100 text-indigo-700 ring-indigo-200",
+  CANCELADO:    "bg-rose-100 text-rose-700 ring-rose-200",
 };
 
 export default function InventoriesPage() {
@@ -185,8 +194,12 @@ export default function InventoriesPage() {
                   <span className="rounded-full bg-slate-100 px-2 py-1">
                     Perfil: {inventory.role}
                   </span>
-                  <span className="rounded-full bg-slate-100 px-2 py-1">
-                    Status:{" "}
+                  <span
+                    className={`inline-flex items-center rounded-full px-2 py-1 font-medium ring-1 ${
+                      STATUS_BADGE_STYLES[inventory.statusOperacao] ||
+                      "bg-slate-100 text-slate-600 ring-slate-200"
+                    }`}
+                  >
                     {STATUS_LABELS[inventory.statusOperacao] ||
                       inventory.statusOperacao}
                   </span>
