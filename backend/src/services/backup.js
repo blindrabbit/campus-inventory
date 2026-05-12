@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { createHash } from "crypto";
 import { prisma } from "../prisma/client.js";
 
 // Directory where SQL backup files are stored
@@ -13,7 +14,7 @@ export function ensureBackupDir() {
 
 function sqlVal(v) {
   if (v === null || v === undefined) return "NULL";
-  if (typeof v === "boolean") return v ? "1" : "0";
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
   if (v instanceof Date) return `'${v.toISOString()}'`;
   if (typeof v === "number") return String(v);
   // Escape single quotes inside strings
@@ -21,22 +22,21 @@ function sqlVal(v) {
 }
 
 function rowToInsert(table, row) {
-  const cols = Object.keys(row).join(", ");
+  const cols = Object.keys(row).map((k) => `"${k}"`).join(", ");
   const vals = Object.values(row).map(sqlVal).join(", ");
-  return `INSERT INTO ${table} (${cols}) VALUES (${vals});`;
+  return `INSERT INTO "${table}" (${cols}) VALUES (${vals});`;
 }
 
 // ─── SQL generation ───────────────────────────────────────────────────────────
 
-export async function generateInventorySQL(inventoryId) {
+export async function generateInventorySQL(inventoryId, generatedAt = new Date()) {
   const lines = [];
 
   lines.push("-- Campus Inventory Backup");
   lines.push(`-- Inventory ID: ${inventoryId}`);
-  lines.push(`-- Generated at: ${new Date().toISOString()}`);
+  lines.push(`-- Generated at: ${generatedAt.toISOString()}`);
   lines.push("");
-  lines.push("PRAGMA foreign_keys = OFF;");
-  lines.push("BEGIN TRANSACTION;");
+  lines.push("BEGIN;");
   lines.push("");
 
   // 1. Inventory
@@ -204,7 +204,6 @@ export async function generateInventorySQL(inventoryId) {
   }
 
   lines.push("COMMIT;");
-  lines.push("PRAGMA foreign_keys = ON;");
 
   return lines.join("\n");
 }
@@ -245,13 +244,51 @@ export async function createBackup({ inventoryId, createdBy, label = null, isSch
 
   try {
     await acquireLock(inventoryId, "BACKUP", createdBy);
-    const sql = await generateInventorySQL(inventoryId);
+    const generatedAt = new Date();
+    const sql = await generateInventorySQL(inventoryId, generatedAt);
+
+    // Hash calculado sobre o SQL sem a linha de timestamp (linha 3),
+    // para que backups com conteúdo idêntico mas timestamps diferentes sejam detectados.
+    const sqlForHash = sql.split("\n").filter((l) => !l.startsWith("-- Generated at:")).join("\n");
+    const contentHash = createHash("sha256").update(sqlForHash).digest("hex");
+
     fs.writeFileSync(filePath, sql, "utf8");
     const fileSizeBytes = fs.statSync(filePath).size;
 
+    // ── Deduplicação: apenas para backups agendados ──────────────────────────
+    // Busca o backup agendado anterior mais recente com status COMPLETED
+    let dedupCount = 0;
+    if (isScheduled) {
+      const prev = await prisma.backupRecord.findFirst({
+        where: {
+          inventoryId,
+          isScheduled: true,
+          status: "COMPLETED",
+          id: { not: record.id },
+          contentHash: { not: null },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (prev?.contentHash === contentHash) {
+        // Conteúdo idêntico: herda a contagem acumulada e descarta o anterior
+        dedupCount = (prev.dedupCount ?? 0) + 1;
+
+        // Remove arquivo do disco (ignorar se já não existir)
+        try { fs.unlinkSync(prev.filePath); } catch { /* arquivo já ausente */ }
+
+        await prisma.backupRecord.delete({ where: { id: prev.id } });
+
+        console.log(
+          `[Backup] Backup agendado idêntico ao anterior — descartado ${prev.id} ` +
+          `(duplicata #${dedupCount} para inventário ${inventoryId})`
+        );
+      }
+    }
+
     const updated = await prisma.backupRecord.update({
       where: { id: record.id },
-      data: { status: "COMPLETED", fileSizeBytes },
+      data: { status: "COMPLETED", fileSizeBytes, contentHash, dedupCount },
     });
 
     return updated;
@@ -268,6 +305,117 @@ export async function createBackup({ inventoryId, createdBy, label = null, isSch
 
 // ─── Restore backup ───────────────────────────────────────────────────────────
 
+// Colunas booleanas conhecidas — usadas para converter 1/0 (SQLite) → TRUE/FALSE (PG)
+const BOOLEAN_COLUMNS = new Set([
+  "isActive", "isFinalized", "isVerifiedByRevisor",
+  "pendingConfirm", "wasUnfound", "isScheduled",
+]);
+
+// Tokenizador simples de lista de valores SQL, respeitando strings com aspas simples
+function tokenizeValues(valStr) {
+  const tokens = [];
+  let i = 0;
+  let current = "";
+
+  while (i < valStr.length) {
+    const ch = valStr[i];
+    if (ch === "'") {
+      current = "'";
+      i++;
+      while (i < valStr.length) {
+        if (valStr[i] === "'" && valStr[i + 1] === "'") {
+          current += "''"; i += 2;
+        } else if (valStr[i] === "'") {
+          current += "'"; i++; break;
+        } else {
+          current += valStr[i++];
+        }
+      }
+      tokens.push(current); current = "";
+    } else if (ch === ",") {
+      if (current.trim()) tokens.push(current.trim());
+      current = ""; i++;
+    } else {
+      current += ch; i++;
+    }
+  }
+  if (current.trim()) tokens.push(current.trim());
+  return tokens;
+}
+
+// Corrige valores booleanos em INSERTs gerados no formato SQLite (1/0 → TRUE/FALSE)
+function fixInsertBooleans(stmt) {
+  const match = stmt.match(/^INSERT INTO "?(\w+)"?\s*\(([^)]+)\)\s*VALUES\s*\((.+)\)$/is);
+  if (!match) return stmt;
+
+  const cols = match[2].split(",").map((c) => c.trim().replace(/["`]/g, ""));
+  const vals = tokenizeValues(match[3]);
+
+  const fixed = vals.map((v, i) => {
+    if (i < cols.length && BOOLEAN_COLUMNS.has(cols[i])) {
+      if (v === "1") return "TRUE";
+      if (v === "0") return "FALSE";
+    }
+    return v;
+  });
+
+  const quotedCols = cols.map((c) => `"${c}"`).join(", ");
+  return `INSERT INTO "${match[1]}" (${quotedCols}) VALUES (${fixed.join(", ")})`;
+}
+
+// Extrai e normaliza statements do SQL de backup para execução no PostgreSQL.
+// Usa um parser que respeita strings entre aspas simples, evitando split incorreto
+// em valores que contêm ';' (ex: "ATKINS, PETER; JONES, LORETTA").
+function parseRestoreStatements(sql) {
+  // Primeiro, remove linhas de controle (comentários, PRAGMA, BEGIN, COMMIT)
+  const filtered = sql
+    .split("\n")
+    .filter((l) => {
+      const t = l.trim();
+      return (
+        t &&
+        !t.startsWith("--") &&
+        !t.startsWith("PRAGMA") &&
+        !t.toUpperCase().startsWith("BEGIN") &&
+        !t.toUpperCase().startsWith("COMMIT")
+      );
+    })
+    .join("\n");
+
+  // Divide em statements respeitando strings entre aspas simples
+  const statements = [];
+  let current = "";
+  let inStr = false;
+  let i = 0;
+
+  while (i < filtered.length) {
+    const ch = filtered[i];
+    if (inStr) {
+      if (ch === "'" && filtered[i + 1] === "'") {
+        current += "''"; i += 2;          // '' é aspas escapada dentro de string
+      } else if (ch === "'") {
+        current += ch; inStr = false; i++; // fecha a string
+      } else {
+        current += ch; i++;
+      }
+    } else {
+      if (ch === "'") {
+        inStr = true; current += ch; i++;  // abre string
+      } else if (ch === ";") {
+        const stmt = current.trim();
+        if (stmt) statements.push(stmt);
+        current = ""; i++;
+      } else {
+        current += ch; i++;
+      }
+    }
+  }
+  const tail = current.trim();
+  if (tail) statements.push(tail);
+
+  return statements.map(fixInsertBooleans);
+}
+
 export async function restoreBackup({ backupId, requestedBy }) {
   const record = await prisma.backupRecord.findUnique({ where: { id: backupId } });
   if (!record) throw new Error("Backup não encontrado");
@@ -276,8 +424,8 @@ export async function restoreBackup({ backupId, requestedBy }) {
 
   const { inventoryId } = record;
 
-  // Safety: create a backup of the current state before restoring.
-  // If this fails, abort — do not proceed with a restore that has no safety net.
+  // Cria backup de segurança do estado atual antes de qualquer alteração.
+  // Se falhar, aborta — não restaura sem rede de segurança.
   await createBackup({
     inventoryId,
     createdBy: requestedBy,
@@ -285,73 +433,75 @@ export async function restoreBackup({ backupId, requestedBy }) {
     isScheduled: false,
   });
 
-  // Preserve backup operational data before cascade-delete wipes it.
-  // BackupRecord/BackupSchedule have onDelete: Cascade on Inventory, so they
-  // would be lost when the inventory row is deleted during restore.
+  // Preserva registros operacionais de backup antes de o cascade os apagar.
   const savedBackupRecords = await prisma.backupRecord.findMany({ where: { inventoryId } });
   const savedBackupSchedule = await prisma.backupSchedule.findUnique({ where: { inventoryId } });
 
+  const sql = fs.readFileSync(record.filePath, "utf8");
+  const statements = parseRestoreStatements(sql);
+
   await acquireLock(inventoryId, "RESTORE", requestedBy);
   try {
-    const sql = fs.readFileSync(record.filePath, "utf8");
+    // Tudo dentro de uma única transação PostgreSQL:
+    // se qualquer statement falhar → rollback automático → dados preservados.
+    await prisma.$transaction(
+      async (tx) => {
+        // 1. Delete em ordem reversa de FK
+        const spaces = await tx.space.findMany({ where: { inventoryId }, select: { id: true } });
+        const spaceIds = spaces.map((s) => s.id);
+        const items = await tx.item.findMany({ where: { inventoryId }, select: { id: true } });
+        const itemIds = items.map((i) => i.id);
 
-    // Delete all existing inventory data in reverse FK order
-    const spaces = await prisma.space.findMany({ where: { inventoryId }, select: { id: true } });
-    const spaceIds = spaces.map((s) => s.id);
-    const items = await prisma.item.findMany({ where: { inventoryId }, select: { id: true } });
-    const itemIds = items.map((i) => i.id);
+        if (spaceIds.length > 0) {
+          await tx.finalizationHistory.deleteMany({ where: { spaceId: { in: spaceIds } } });
+          await tx.verificationRoll.deleteMany({ where: { spaceId: { in: spaceIds } } });
+        }
+        if (itemIds.length > 0) {
+          await tx.itemHistorico.deleteMany({ where: { itemId: { in: itemIds } } });
+          await tx.relocation.deleteMany({ where: { itemId: { in: itemIds } } });
+        }
+        await tx.item.deleteMany({ where: { inventoryId } });
+        await tx.itemGroup.deleteMany({ where: { inventoryId } });
+        await tx.space.deleteMany({ where: { inventoryId } });
+        await tx.inventoryStatusHistory.deleteMany({ where: { inventoryId } });
+        await tx.inventoryUser.deleteMany({ where: { inventoryId } });
+        await tx.inventory.deleteMany({ where: { id: inventoryId } });
 
-    if (spaceIds.length > 0) {
-      await prisma.finalizationHistory.deleteMany({ where: { spaceId: { in: spaceIds } } });
-      await prisma.verificationRoll.deleteMany({ where: { spaceId: { in: spaceIds } } });
-    }
-    if (itemIds.length > 0) {
-      await prisma.itemHistorico.deleteMany({ where: { itemId: { in: itemIds } } });
-      await prisma.relocation.deleteMany({ where: { itemId: { in: itemIds } } });
-    }
-    await prisma.item.deleteMany({ where: { inventoryId } });
-    await prisma.itemGroup.deleteMany({ where: { inventoryId } });
-    await prisma.space.deleteMany({ where: { inventoryId } });
-    await prisma.inventoryStatusHistory.deleteMany({ where: { inventoryId } });
-    await prisma.inventoryUser.deleteMany({ where: { inventoryId } });
-    // Cascade on Inventory also deletes backupRecords and backupSchedule
-    await prisma.inventory.deleteMany({ where: { id: inventoryId } });
+        // 2. Re-insere a partir do SQL do backup
+        for (const stmt of statements) {
+          await tx.$executeRawUnsafe(stmt);
+        }
 
-    // Execute restore SQL using raw queries statement by statement
-    const statements = sql
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith("--") && !l.startsWith("PRAGMA") && !l.startsWith("BEGIN") && !l.startsWith("COMMIT"))
-      .join("\n")
-      .split(";")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    for (const stmt of statements) {
-      await prisma.$executeRawUnsafe(stmt);
-    }
-
-    // Re-insert preserved backup operational data (not part of inventory business data)
-    for (const r of savedBackupRecords) {
-      await prisma.backupRecord.create({
-        data: {
-          id: r.id, inventoryId: r.inventoryId, fileName: r.fileName,
-          filePath: r.filePath, label: r.label, status: r.status,
-          fileSizeBytes: r.fileSizeBytes, errorMessage: r.errorMessage,
-          isScheduled: r.isScheduled, createdBy: r.createdBy, createdAt: r.createdAt,
-        },
-      });
-    }
-    if (savedBackupSchedule) {
-      await prisma.backupSchedule.create({
-        data: {
-          id: savedBackupSchedule.id, inventoryId: savedBackupSchedule.inventoryId,
-          intervalHours: savedBackupSchedule.intervalHours, nextRunAt: savedBackupSchedule.nextRunAt,
-          lastRunAt: savedBackupSchedule.lastRunAt, isActive: savedBackupSchedule.isActive,
-          createdBy: savedBackupSchedule.createdBy, createdAt: savedBackupSchedule.createdAt,
-        },
-      });
-    }
+        // 3. Re-insere registros operacionais de backup preservados (upsert para evitar conflito de IDs)
+        for (const r of savedBackupRecords) {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO backup_records
+               (id, "inventoryId", "createdBy", "createdAt", label, "fileName", "filePath",
+                "fileSizeBytes", status, "errorMessage", "isScheduled", "contentHash", "dedupCount")
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (id) DO NOTHING`,
+            r.id, r.inventoryId, r.createdBy, r.createdAt, r.label ?? null,
+            r.fileName, r.filePath, r.fileSizeBytes, r.status, r.errorMessage ?? null,
+            r.isScheduled, r.contentHash ?? null, r.dedupCount ?? 0
+          );
+        }
+        if (savedBackupSchedule) {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO backup_schedules
+               (id, "inventoryId", "intervalHours", "isActive", "lastRunAt", "nextRunAt",
+                "createdBy", "createdAt", "updatedAt")
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (id) DO NOTHING`,
+            savedBackupSchedule.id, savedBackupSchedule.inventoryId,
+            savedBackupSchedule.intervalHours, savedBackupSchedule.isActive,
+            savedBackupSchedule.lastRunAt ?? null, savedBackupSchedule.nextRunAt,
+            savedBackupSchedule.createdBy, savedBackupSchedule.createdAt,
+            savedBackupSchedule.updatedAt
+          );
+        }
+      },
+      { timeout: 300_000 } // 5 minutos para inventários grandes
+    );
 
     return { success: true, inventoryId };
   } finally {
@@ -403,4 +553,10 @@ export function startBackupScheduler() {
   // Check every 60 seconds
   schedulerInterval = setInterval(runDueSchedules, 60_000);
   console.log("🗄️  Backup scheduler iniciado");
+}
+
+// Remove locks órfãos deixados por crashes ou reinicios do servidor
+export async function clearStaleLocks() {
+  const { count } = await prisma.systemLock.deleteMany({});
+  if (count > 0) console.log(`🔓 ${count} lock(s) órfão(s) removido(s) na inicialização`);
 }

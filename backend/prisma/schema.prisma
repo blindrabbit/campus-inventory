@@ -4,7 +4,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -254,6 +254,8 @@ model BackupRecord {
   status      String   @default("COMPLETED") // "IN_PROGRESS" | "COMPLETED" | "FAILED"
   errorMessage String?
   isScheduled Boolean  @default(false)
+  contentHash String?  // SHA-256 do SQL gerado; usado para deduplicação em backups agendados
+  dedupCount  Int      @default(0) // nº de backups agendados idênticos que este substituiu
 
   @@index([inventoryId, createdAt])
   @@map("backup_records")

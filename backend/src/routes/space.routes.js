@@ -85,14 +85,14 @@ async function ensureUniqueSpaceName(name, inventoryId, excludeId = null) {
     ? await prisma.$queryRaw`
         SELECT id FROM spaces
         WHERE lower(name) = lower(${name})
-          AND inventoryId = ${inventoryId}
+          AND "inventoryId" = ${inventoryId}
           AND id <> ${excludeId}
         LIMIT 1
       `
     : await prisma.$queryRaw`
         SELECT id FROM spaces
         WHERE lower(name) = lower(${name})
-          AND inventoryId = ${inventoryId}
+          AND "inventoryId" = ${inventoryId}
         LIMIT 1
       `;
 

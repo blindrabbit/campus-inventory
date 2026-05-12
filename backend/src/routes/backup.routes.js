@@ -29,6 +29,12 @@ router.get(
       const records = await prisma.backupRecord.findMany({
         where: { inventoryId: req.inventoryId },
         orderBy: { createdAt: "desc" },
+        select: {
+          id: true, inventoryId: true, createdBy: true, createdAt: true,
+          label: true, fileName: true, filePath: true, fileSizeBytes: true,
+          status: true, errorMessage: true, isScheduled: true, dedupCount: true,
+          // contentHash é dado interno — não exposto
+        },
       });
       return res.json(records);
     } catch (err) {

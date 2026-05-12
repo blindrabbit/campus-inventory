@@ -14,8 +14,10 @@ import eventsRoutes from "./routes/events.routes.js";
 import { ensureSpaceCountersTable } from "./services/metrics.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import backupRoutes from "./routes/backup.routes.js";
-import { startBackupScheduler, ensureBackupDir } from "./services/backup.js";
+import { startBackupScheduler, ensureBackupDir, clearStaleLocks } from "./services/backup.js";
 import { requireNotLocked } from "./middleware/lock.js";
+import { eventLogMiddleware } from "./middleware/event-log.js";
+import { ensureEventLogTable } from "./services/event-log.js";
 
 const app = express();
 const isProduction = process.env.NODE_ENV === "production";
@@ -61,6 +63,7 @@ app.use(
 );
 
 app.use(express.json({ limit: "1mb" }));
+app.use(eventLogMiddleware);
 
 // Lock middleware: bloqueia escrita em inventários em backup/restore
 const lockMiddleware = requireNotLocked();
@@ -94,6 +97,8 @@ const PORT = process.env.PORT || 8000;
 (async () => {
   try {
     await ensureSpaceCountersTable();
+    await ensureEventLogTable();
+    await clearStaleLocks();
     ensureBackupDir();
     startBackupScheduler();
     app.listen(PORT, "0.0.0.0", () => {

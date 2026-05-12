@@ -2,6 +2,7 @@ import { Router } from "express";
 import { verifyJWT, requireRole } from "../middleware/auth.js";
 import { requireInventoryAccess } from "../middleware/inventory.js";
 import { prisma } from "../prisma/client.js";
+import { queryEventLog, getEventLogInsights } from "../services/event-log.js";
 
 const router = Router();
 
@@ -277,6 +278,89 @@ router.get(
     } catch (err) {
       console.error("Error loading item history:", err);
       res.status(500).json({ error: "Erro ao carregar histórico" });
+    }
+  },
+);
+
+// ─── GET /api/audit/event-log — log de eventos da API ────────────────────────
+router.get(
+  "/event-log",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireRole("ADMIN"),
+  async (req, res) => {
+    try {
+      const now = new Date();
+      const defaultFrom = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+      const from       = req.query.from   ? new Date(req.query.from)  : defaultFrom;
+      const to         = req.query.to     ? new Date(req.query.to)    : now;
+      const userId     = req.query.userId || null;
+      const onlyErrors = req.query.onlyErrors === "true";
+      const limit      = Math.min(Number(req.query.limit  || 100), 500);
+      const offset     = Math.max(Number(req.query.offset || 0),   0);
+
+      const { rows, total } = await queryEventLog({
+        inventoryId: req.inventoryId,
+        from, to, userId, onlyErrors, limit, offset,
+      });
+
+      return res.json({ rows, total, limit, offset });
+    } catch (err) {
+      console.error("[audit] event-log error:", err);
+      return res.status(500).json({ error: "Erro ao consultar log de eventos" });
+    }
+  },
+);
+
+// ─── GET /api/audit/event-log/insights — agregações e insights ───────────────
+router.get(
+  "/event-log/insights",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireRole("ADMIN"),
+  async (req, res) => {
+    try {
+      const now = new Date();
+      const defaultFrom = new Date(now - 7 * 24 * 60 * 60 * 1000);
+      const from = req.query.from ? new Date(req.query.from) : defaultFrom;
+      const to   = req.query.to   ? new Date(req.query.to)   : now;
+
+      const insights = await getEventLogInsights({
+        inventoryId: req.inventoryId,
+        from, to,
+      });
+
+      return res.json(insights);
+    } catch (err) {
+      console.error("[audit] insights error:", err);
+      return res.status(500).json({ error: "Erro ao gerar insights" });
+    }
+  },
+);
+
+// ─── GET /api/audit/event-log/users — lista usuários que geraram eventos ─────
+router.get(
+  "/event-log/users",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireRole("ADMIN"),
+  async (req, res) => {
+    try {
+      const now = new Date();
+      const from = req.query.from ? new Date(req.query.from) : new Date(now - 30 * 24 * 60 * 60 * 1000);
+      const to   = req.query.to   ? new Date(req.query.to)   : now;
+
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT DISTINCT user_id, user_name
+         FROM api_event_log
+         WHERE ts BETWEEN $1 AND $2 AND inventory_id = $3 AND user_id IS NOT NULL
+         ORDER BY user_name ASC`,
+        from, to, req.inventoryId,
+      );
+      return res.json(rows.map(r => ({ userId: r.user_id, userName: r.user_name })));
+    } catch (err) {
+      return res.status(500).json({ error: "Erro ao listar usuários" });
     }
   },
 );

@@ -181,7 +181,7 @@ const ensureInventoryAuditLogTable = async (db) => {
       toValue TEXT,
       metadata TEXT,
       changedBy TEXT NOT NULL,
-      changedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      changedAt TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `;
 
@@ -1516,10 +1516,10 @@ router.get(
             orderBy: { changedAt: "desc" },
           })
         : await prisma.$queryRaw`
-            SELECT id, fromStatus, toStatus, changedBy, changedAt
+            SELECT id, "fromStatus", "toStatus", "changedBy", "changedAt"
             FROM inventory_status_history
-            WHERE inventoryId = ${req.inventoryId}
-            ORDER BY changedAt DESC
+            WHERE "inventoryId" = ${req.inventoryId}
+            ORDER BY "changedAt" DESC
           `;
 
       return res.json(
@@ -1954,7 +1954,8 @@ router.get(
       await ensureInventoryAuditLogTable(prisma);
 
       const rows = await prisma.$queryRaw`
-        SELECT id, action, field, fromValue, toValue, metadata, changedBy, changedAt
+        SELECT id, action, field, fromValue AS "fromValue", toValue AS "toValue",
+               metadata, changedBy AS "changedBy", changedAt AS "changedAt"
         FROM inventory_audit_log
         WHERE inventoryId = ${req.inventoryId}
         ORDER BY changedAt DESC

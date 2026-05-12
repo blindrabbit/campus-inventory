@@ -1451,7 +1451,7 @@ export default function DashboardPage() {
                     <button
                       key={tab.id}
                       type="button"
-                      onClick={() => setActiveTab(tab.id)}
+                      onClick={() => tab.id === "estrategico" ? router.push("/dashboard/estrategico") : setActiveTab(tab.id)}
                       className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
                         isActive
                           ? "bg-slate-900 text-white"
@@ -1464,13 +1464,24 @@ export default function DashboardPage() {
                 })}
               </div>
               {hasAuditAccess ? (
-                <button
-                  type="button"
-                  onClick={() => router.push("/admin/unfound-items")}
-                  className="ml-auto rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
-                >
-                  Auditoria
-                </button>
+                <div className="ml-auto flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => router.push("/admin/unfound-items")}
+                    className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
+                  >
+                    Auditoria
+                  </button>
+                  {user?.role === "ADMIN" && (
+                    <button
+                      type="button"
+                      onClick={() => router.push("/admin/event-log")}
+                      className="rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
+                    >
+                      Relatório de Eventos
+                    </button>
+                  )}
+                </div>
               ) : null}
             </nav>
           </div>
@@ -1485,7 +1496,10 @@ export default function DashboardPage() {
             <select
               id="dashboard-main-tab-select"
               value={activeTab}
-              onChange={(event) => setActiveTab(event.target.value)}
+              onChange={(event) => {
+                  if (event.target.value === "estrategico") { router.push("/dashboard/estrategico"); }
+                  else { setActiveTab(event.target.value); }
+                }}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
             >
               {visibleTabs.map((tab) => (
@@ -1495,13 +1509,24 @@ export default function DashboardPage() {
               ))}
             </select>
             {hasAuditAccess ? (
-              <button
-                type="button"
-                onClick={() => router.push("/admin/unfound-items")}
-                className="mt-3 w-full rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
-              >
-                Auditoria
-              </button>
+              <div className="mt-3 flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => router.push("/admin/unfound-items")}
+                  className="w-full rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
+                >
+                  Auditoria
+                </button>
+                {user?.role === "ADMIN" && (
+                  <button
+                    type="button"
+                    onClick={() => router.push("/admin/event-log")}
+                    className="w-full rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
+                  >
+                    Relatório de Eventos
+                  </button>
+                )}
+              </div>
             ) : null}
           </div>
         </div>
@@ -1525,20 +1550,6 @@ export default function DashboardPage() {
           </div>
         ) : null}
 
-        {activeTab === "estrategico" ? (
-          <StrategicDashboardPanel
-            visible={
-              !dashboardSummaryDenied &&
-              (dashboardSummaryLoading ||
-                Boolean(dashboardSummary) ||
-                Boolean(dashboardSummaryError))
-            }
-            loading={dashboardSummaryLoading}
-            summary={dashboardSummary}
-            error={dashboardSummaryError}
-            recentEvents={dashboardRecentEvents}
-          />
-        ) : null}
 
         {activeTab === "espacos" && sortedSpaces.length === 0 ? (
           <div className="bg-white rounded-xl shadow-md p-12 text-center">

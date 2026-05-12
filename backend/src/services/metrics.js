@@ -10,7 +10,7 @@ export async function ensureSpaceCountersTable() {
       unfound_count INTEGER NOT NULL DEFAULT 0,
       pending_count INTEGER NOT NULL DEFAULT 0,
       relocated_pending INTEGER NOT NULL DEFAULT 0,
-      last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      last_updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `;
 
@@ -85,6 +85,16 @@ export async function incrementSpaceCounters(spaceId, inventoryId, deltas = {}) 
     SELECT * FROM space_counters WHERE spaceId = ${spaceId}
   `;
   return Array.isArray(row) && row[0] ? row[0] : null;
+}
+
+export async function recomputeAllSpaceCounters(inventoryId) {
+  const spaces = await prisma.space.findMany({
+    where: { inventoryId },
+    select: { id: true },
+  });
+  for (const space of spaces) {
+    await recomputeSpaceCounters(space.id, inventoryId);
+  }
 }
 
 export async function getInventoryCounters(inventoryId) {

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { verifyJWT } from "../middleware/auth.js";
 import { requireInventoryAccess } from "../middleware/inventory.js";
 import { prisma } from "../prisma/client.js";
-import { getInventoryCounters } from "../services/metrics.js";
+import { getInventoryCounters, recomputeAllSpaceCounters } from "../services/metrics.js";
 
 const router = Router();
 
@@ -55,7 +55,7 @@ router.get(
         relocatedPending = Number(counters.relocated_pending || 0);
 
         const rows = await prisma.$queryRaw`
-          SELECT sc.spaceId, sc.total_items, sc.checked_count, s.name
+          SELECT sc.spaceId AS "spaceId", sc.total_items, sc.checked_count, s.name
           FROM space_counters sc
           LEFT JOIN spaces s ON s.id = sc.spaceId
           WHERE sc.inventoryId = ${inventoryId}
@@ -67,7 +67,7 @@ router.get(
           const total = Number(r.total_items || 0);
           const checked = Number(r.checked_count || 0);
           const coverage = total === 0 ? 1 : checked / total;
-          return { id: r.spaceId, name: r.name || "-", total, checked, coverage };
+          return { id: r["spaceId"], name: r.name || "-", total, checked, coverage };
         });
 
         lowCoverage = spaceCoverages.filter((s) => s.total > 0).slice(0, 10);
@@ -200,6 +200,168 @@ router.get(
     } catch (err) {
       console.error("Error building dashboard summary:", err);
       return res.status(500).json({ error: "Erro ao montar resumo do dashboard" });
+    }
+  },
+);
+
+// ─── GET /api/dashboard/strategic ────────────────────────────────────────────
+router.get(
+  "/strategic",
+  verifyJWT,
+  requireInventoryAccess(),
+  async (req, res) => {
+    try {
+      const inventoryId = req.inventoryId;
+
+      const inventory = await prisma.inventory.findUnique({
+        where: { id: inventoryId },
+        select: { id: true, name: true, campus: true, createdById: true },
+      });
+
+      const requestUser = req.requestUser || null;
+      const allowed =
+        req.inventoryRole === "ADMIN_CICLO" ||
+        requestUser?.role === "ADMIN" ||
+        (inventory && requestUser && inventory.createdById === requestUser.id);
+
+      if (!allowed) {
+        return res.status(403).json({ error: "Acesso negado ao painel estratégico" });
+      }
+
+      // ── Spaces with counters (space_counters or direct aggregate fallback) ──
+      let spaceRows = await prisma.$queryRaw`
+        SELECT
+          sc.spaceId AS "spaceId",
+          sc.total_items,
+          sc.checked_count,
+          sc.unfound_count,
+          sc.pending_count,
+          sc.relocated_pending,
+          s.name,
+          s.sector,
+          s.unit,
+          s.responsible,
+          s."startedBy",
+          s."isFinalized",
+          s."isVerifiedByRevisor",
+          s."startedAt"
+        FROM space_counters sc
+        LEFT JOIN spaces s ON s.id = sc.spaceId
+        WHERE sc.inventoryId = ${inventoryId}
+        ORDER BY sc.total_items DESC
+      `;
+
+      // Fallback: if space_counters is missing or incomplete, aggregate directly
+      // from items table and rebuild counters asynchronously for future requests
+      const totalSpaces = await prisma.space.count({ where: { inventoryId } });
+      if (spaceRows.length < totalSpaces) {
+        spaceRows = await prisma.$queryRaw`
+          SELECT
+            s.id                    AS "spaceId",
+            s.name,
+            s.sector,
+            s.unit,
+            s.responsible,
+            s."startedBy",
+            s."isFinalized",
+            s."isVerifiedByRevisor",
+            s."startedAt",
+            COUNT(i.id)             AS total_items,
+            SUM(CASE WHEN i."Encontrado" = 'SIM'      THEN 1 ELSE 0 END) AS checked_count,
+            SUM(CASE WHEN i."Encontrado" = 'NAO'      THEN 1 ELSE 0 END) AS unfound_count,
+            SUM(CASE WHEN i."Encontrado" = 'PENDENTE' THEN 1 ELSE 0 END) AS pending_count,
+            0                       AS relocated_pending
+          FROM spaces s
+          LEFT JOIN items i ON i."spaceId" = s.id AND i."inventoryId" = ${inventoryId}
+          WHERE s."inventoryId" = ${inventoryId}
+          GROUP BY s.id
+          ORDER BY total_items DESC
+        `;
+        // Rebuild counters in background so next request hits the fast path
+        recomputeAllSpaceCounters(inventoryId).catch(() => {});
+      }
+
+      const rawSpaces = spaceRows.map((r) => ({
+        spaceId: r.spaceId,
+        name: r.name || "—",
+        sector: r.sector || null,
+        unit: r.unit || null,
+        responsible: r.responsible || null,
+        startedBy: r.startedBy || null,
+        isFinalized: Boolean(r.isFinalized),
+        isVerifiedByRevisor: Boolean(r.isVerifiedByRevisor),
+        startedAt: r.startedAt || null,
+        totalItems: Number(r.total_items || 0),
+        checkedCount: Number(r.checked_count || 0),
+        unfoundCount: Number(r.unfound_count || 0),
+        pendingCount: Number(r.pending_count || 0),
+        relocatedPending: Number(r.relocated_pending || 0),
+      }));
+
+      // ── Per-user breakdown ────────────────────────────────────────────────
+      const [foundByUser, unfoundByUser, movedByUser] = await Promise.all([
+        prisma.item.groupBy({
+          by: ["ultimoConferente"],
+          where: { inventoryId, statusEncontrado: "SIM", ultimoConferente: { not: null } },
+          _count: { id: true },
+        }),
+        prisma.itemHistorico.groupBy({
+          by: ["createdBy"],
+          where: { item: { inventoryId }, action: "NAO_LOCALIZADO" },
+          _count: { id: true },
+        }),
+        prisma.itemHistorico.groupBy({
+          by: ["createdBy"],
+          where: { item: { inventoryId }, action: "REALOCADO" },
+          _count: { id: true },
+        }),
+      ]);
+
+      const allSams = [
+        ...foundByUser.map((r) => r.ultimoConferente),
+        ...unfoundByUser.map((r) => r.createdBy),
+        ...movedByUser.map((r) => r.createdBy),
+        ...rawSpaces.map((s) => s.startedBy),
+      ].filter(Boolean);
+
+      const users = await prisma.user.findMany({
+        where: { samAccountName: { in: [...new Set(allSams)] } },
+        select: { samAccountName: true, fullName: true },
+      });
+      const nameMap = Object.fromEntries(users.map((u) => [u.samAccountName, u.fullName]));
+
+      const spaces = rawSpaces.map((s) => ({
+        ...s,
+        startedByName: s.startedBy ? (nameMap[s.startedBy] || s.startedBy) : null,
+      }));
+
+      const byUserMap = {};
+      const ensure = (sam) => {
+        if (!byUserMap[sam]) byUserMap[sam] = { samAccountName: sam, foundCount: 0, unfoundCount: 0, movedCount: 0 };
+      };
+      for (const r of foundByUser) { ensure(r.ultimoConferente); byUserMap[r.ultimoConferente].foundCount += r._count.id; }
+      for (const r of unfoundByUser) { ensure(r.createdBy); byUserMap[r.createdBy].unfoundCount += r._count.id; }
+      for (const r of movedByUser) { ensure(r.createdBy); byUserMap[r.createdBy].movedCount += r._count.id; }
+
+      const byUser = Object.values(byUserMap)
+        .map((u) => ({
+          ...u,
+          fullName: nameMap[u.samAccountName] || u.samAccountName,
+          total: u.foundCount + u.unfoundCount + u.movedCount,
+        }))
+        .sort((a, b) => b.total - a.total);
+
+      return res.json({
+        inventoryId,
+        inventoryName: inventory?.name || "",
+        campus: inventory?.campus || "",
+        spaces,
+        byUser,
+        timestamp: new Date(),
+      });
+    } catch (err) {
+      console.error("Error building strategic dashboard:", err);
+      return res.status(500).json({ error: "Erro ao montar painel estratégico" });
     }
   },
 );
