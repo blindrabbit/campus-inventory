@@ -1845,4 +1845,119 @@ router.post(
   },
 );
 
+// ─── POST /items/action-by-ids — ações em lote por array de IDs (multi-select) ─
+// Substitui o forEach de enqueueAction no frontend, evitando race condition no queue.
+router.post(
+  "/action-by-ids",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const { itemIds, action, condicaoVisual, targetSpaceId, connectionId } = req.body;
+      const user = req.user;
+
+      if (!Array.isArray(itemIds) || itemIds.length === 0) {
+        return res.status(400).json({ error: "itemIds é obrigatório e deve ser um array não-vazio" });
+      }
+      if (!["check", "unfound", "relocate"].includes(action)) {
+        return res.status(400).json({ error: "action deve ser 'check', 'unfound' ou 'relocate'" });
+      }
+      if (action === "relocate" && !targetSpaceId) {
+        return res.status(400).json({ error: "targetSpaceId é obrigatório para action 'relocate'" });
+      }
+
+      // Carrega apenas itens do inventário correto
+      const items = await prisma.item.findMany({
+        where: { id: { in: itemIds }, inventoryId: req.inventoryId },
+        select: { id: true, spaceId: true },
+      });
+
+      if (items.length === 0) {
+        return res.json({ success: true, updatedCount: 0 });
+      }
+
+      const timestamp = new Date();
+      const spaceIds = [...new Set(items.map((i) => i.spaceId))];
+
+      if (action === "check") {
+        await prisma.$transaction([
+          prisma.item.updateMany({
+            where: { id: { in: items.map((i) => i.id) } },
+            data: { statusEncontrado: "SIM", condicaoVisual: condicaoVisual || "BOM", dataConferencia: timestamp, ultimoConferente: user.sub },
+          }),
+          prisma.itemHistorico.createMany({
+            data: items.map((item) => ({
+              itemId: item.id, fromSpaceId: item.spaceId,
+              action: "ENCONTRADO", createdBy: user.sub, createdAt: timestamp,
+              metadata: JSON.stringify({ batch: true, source: "multi-select" }),
+            })),
+          }),
+        ]);
+      } else if (action === "unfound") {
+        await prisma.$transaction([
+          prisma.item.updateMany({
+            where: { id: { in: items.map((i) => i.id) } },
+            data: { statusEncontrado: "NAO", lastKnownSpaceId: items[0].spaceId, dataConferencia: timestamp, ultimoConferente: user.sub },
+          }),
+          prisma.itemHistorico.createMany({
+            data: items.map((item) => ({
+              itemId: item.id, fromSpaceId: item.spaceId,
+              action: "NAO_LOCALIZADO", createdBy: user.sub, createdAt: timestamp,
+              metadata: JSON.stringify({ batch: true, source: "multi-select" }),
+            })),
+          }),
+        ]);
+      } else if (action === "relocate") {
+        const targetSpace = await prisma.space.findFirst({
+          where: { id: targetSpaceId, inventoryId: req.inventoryId },
+          select: { id: true, name: true, isFinalized: true },
+        });
+        if (!targetSpace || targetSpace.isFinalized) {
+          return res.status(400).json({ error: "Sala de destino não encontrada ou finalizada" });
+        }
+        await prisma.$transaction([
+          prisma.item.updateMany({
+            where: { id: { in: items.map((i) => i.id) } },
+            data: { spaceId: targetSpaceId, statusEncontrado: "NAO", dataConferencia: timestamp, ultimoConferente: user.sub },
+          }),
+          prisma.itemHistorico.createMany({
+            data: items.map((item) => ({
+              itemId: item.id, fromSpaceId: item.spaceId, toSpaceId: targetSpaceId,
+              action: "REALOCADO", createdBy: user.sub, createdAt: timestamp,
+              metadata: JSON.stringify({ batch: true, source: "multi-select" }),
+            })),
+          }),
+        ]);
+        // Recompute counters for source spaces too
+        for (const sid of spaceIds) {
+          await recomputeSpaceCounters(sid, req.inventoryId).catch(() => {});
+        }
+      }
+
+      // Mark each affected space as started and recompute counters
+      for (const sid of spaceIds) {
+        await markSpaceStarted(prisma, { inventoryId: req.inventoryId, spaceId: sid, user }).catch(() => {});
+        await recomputeSpaceCounters(sid, req.inventoryId).catch(() => {});
+      }
+
+      // SSE broadcast
+      const excludeClientId = connectionId ? `${req.inventoryId}:${user.sub}:${connectionId}` : undefined;
+      const sseAction = action === "check" ? "batch_checked" : action === "unfound" ? "batch_unfound" : "batch_relocated";
+      for (const sid of spaceIds) {
+        broadcast({
+          inventoryId: req.inventoryId, spaceId: sid, action: sseAction, excludeClientId,
+          payload: { count: items.length, user: user.fullName || user.sub, timestamp },
+        });
+      }
+
+      res.json({ success: true, updatedCount: items.length });
+    } catch (err) {
+      console.error("Error in action-by-ids:", err);
+      res.status(500).json({ error: "Erro ao processar ação em lote" });
+    }
+  },
+);
+
 export default router;

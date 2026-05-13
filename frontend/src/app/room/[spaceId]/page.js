@@ -1203,94 +1203,82 @@ export default function RoomPage() {
     }
   }, []);
 
-  const handleMultiCheck = useCallback(() => {
+  const handleMultiCheck = useCallback(async () => {
+    const token = localStorage.getItem("token");
     const inventoryId = localStorage.getItem("activeInventoryId");
     const targets = items.filter(
       (i) => selectedItemIds.has(i.id) && i.statusEncontrado !== "SIM",
     );
-    targets.forEach((item) => {
-      enqueueAction({
-        endpoint: "/items/check",
-        method: "POST",
-        payload: {
-          itemId: item.id,
-          condicao: item.condicaoVisual || "BOM",
-          inventoryId,
-          connectionId,
-        },
-      });
-    });
+    if (targets.length === 0) { exitSelectionMode(); return; }
+
+    // Optimistic UI first
     setItems((prev) =>
       prev.map((i) =>
         selectedItemIds.has(i.id)
-          ? {
-              ...i,
-              statusEncontrado: "SIM",
-              condicaoVisual: i.condicaoVisual || "BOM",
-              meta: { ...i.meta, isRelocated: false },
-            }
+          ? { ...i, statusEncontrado: "SIM", condicaoVisual: i.condicaoVisual || "BOM", meta: { ...i.meta, isRelocated: false } }
           : i,
       ),
     );
-    showToast({
-      type: "success",
-      title: "Itens marcados",
-      message: `${targets.length} item(ns) marcados como encontrados.`,
-    });
     exitSelectionMode();
-  }, [items, selectedItemIds, exitSelectionMode, showToast]);
 
-  const handleMultiUnfound = useCallback(() => {
+    try {
+      await axios.post(`${API}/items/action-by-ids`,
+        { itemIds: targets.map((i) => i.id), action: "check", condicaoVisual: "BOM", inventoryId, connectionId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      showToast({ type: "success", title: "Itens marcados", message: `${targets.length} item(ns) marcados como encontrados.` });
+    } catch {
+      showToast({ type: "error", title: "Erro ao marcar itens", message: "Não foi possível confirmar. Tente novamente." });
+    }
+  }, [items, selectedItemIds, exitSelectionMode, showToast, connectionId]);
+
+  const handleMultiUnfound = useCallback(async () => {
+    const token = localStorage.getItem("token");
     const inventoryId = localStorage.getItem("activeInventoryId");
     const targets = items.filter((i) => selectedItemIds.has(i.id));
-    targets.forEach((item) => {
-      enqueueAction({
-        endpoint: "/items/unfound",
-        method: "POST",
-        payload: { itemId: item.id, inventoryId },
-      });
-    });
+    if (targets.length === 0) { exitSelectionMode(); return; }
+
+    // Optimistic UI first
     setItems((prev) => prev.filter((i) => !selectedItemIds.has(i.id)));
-    showToast({
-      type: "info",
-      title: "Itens não localizados",
-      message: `${targets.length} item(ns) marcados como não localizados.`,
-    });
     exitSelectionMode();
-  }, [items, selectedItemIds, exitSelectionMode, showToast]);
 
-  const handleMultiMove = useCallback(() => {
+    try {
+      await axios.post(`${API}/items/action-by-ids`,
+        { itemIds: targets.map((i) => i.id), action: "unfound", inventoryId, connectionId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      showToast({ type: "info", title: "Itens não localizados", message: `${targets.length} item(ns) marcados como não localizados.` });
+    } catch {
+      showToast({ type: "error", title: "Erro ao marcar itens", message: "Não foi possível confirmar. Tente novamente." });
+    }
+  }, [items, selectedItemIds, exitSelectionMode, showToast, connectionId]);
+
+  const handleMultiMove = useCallback(async () => {
     if (!multiMoveTargetSpaceId) return;
+    const token = localStorage.getItem("token");
     const inventoryId = localStorage.getItem("activeInventoryId");
     const targets = items.filter((i) => selectedItemIds.has(i.id));
-    targets.forEach((item) => {
-      enqueueAction({
-        endpoint: "/items/relocate",
-        method: "POST",
-        payload: {
-          itemId: item.id,
-          targetSpaceId: multiMoveTargetSpaceId,
-          inventoryId,
-          connectionId,
-        },
-      });
-    });
+    if (targets.length === 0) { exitSelectionMode(); return; }
+
+    // Optimistic UI first
     setItems((prev) => prev.filter((i) => !selectedItemIds.has(i.id)));
     setMultiMoveOpen(false);
     setMultiMoveSpaceSearch("");
     setMultiMoveTargetSpaceId("");
-    showToast({
-      type: "success",
-      title: "Itens movidos",
-      message: `${targets.length} item(ns) enviados para a sala de destino.`,
-    });
     exitSelectionMode();
+
+    try {
+      await axios.post(`${API}/items/action-by-ids`,
+        { itemIds: targets.map((i) => i.id), action: "relocate", targetSpaceId: multiMoveTargetSpaceId, inventoryId, connectionId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      showToast({ type: "success", title: "Itens movidos", message: `${targets.length} item(ns) enviados para a sala de destino.` });
+    } catch {
+      showToast({ type: "error", title: "Erro ao mover itens", message: "Não foi possível mover. Tente novamente." });
+    }
   }, [
-    items,
-    selectedItemIds,
-    multiMoveTargetSpaceId,
-    exitSelectionMode,
-    showToast,
+    items, selectedItemIds, multiMoveTargetSpaceId,
+    exitSelectionMode, showToast, connectionId,
   ]);
 
   // ─────────────────────────────────────────────────────────────────────────

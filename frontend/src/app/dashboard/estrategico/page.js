@@ -275,6 +275,12 @@ export default function EstrategicoDashboardPage() {
             >
               ↺ Atualizar
             </button>
+            <button
+              onClick={() => router.push("/dashboard/items")}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-medium"
+            >
+              📋 Rastrear itens
+            </button>
           </div>
         </div>
       </header>

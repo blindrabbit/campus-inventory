@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { verifyJWT, requireRole } from "../middleware/auth.js";
-import { requireInventoryAccess } from "../middleware/inventory.js";
+import { requireInventoryAccess, requireInventoryRoles } from "../middleware/inventory.js";
 import { prisma } from "../prisma/client.js";
 import { queryEventLog, getEventLogInsights } from "../services/event-log.js";
 
@@ -241,7 +241,7 @@ router.get(
   "/items/:itemId/history",
   verifyJWT,
   requireInventoryAccess(),
-  requireRole("ADMIN"),
+  requireInventoryRoles("ADMIN_CICLO"),
   async (req, res) => {
     try {
       const { itemId } = req.params;
@@ -249,12 +249,13 @@ router.get(
       const item = await prisma.item.findUnique({
         where: { id: itemId },
         include: {
+          space: { select: { id: true, name: true } },
           history: {
             include: {
               fromSpace: { select: { id: true, name: true } },
               toSpace: { select: { id: true, name: true } },
             },
-            orderBy: { createdAt: "desc" },
+            orderBy: { createdAt: "asc" },
           },
         },
       });
@@ -267,17 +268,112 @@ router.get(
         return res.status(403).json({ error: "Acesso negado ao inventário" });
       }
 
+      // Resolve full names for all actors in history
+      const actors = [...new Set(item.history.map((h) => h.createdBy).filter(Boolean))];
+      const nameMap = await buildNameMap(actors);
+
       res.json({
         item: {
           id: item.id,
           patrimonio: item.patrimonio,
           descricao: item.descricao,
+          valor: item.valor,
+          condicaoOriginal: item.condicaoOriginal,
+          condicaoVisual: item.condicaoVisual,
+          statusEncontrado: item.statusEncontrado,
+          codigoSIA: item.codigoSIA,
+          fornecedor: item.fornecedor,
+          dataAquisicao: item.dataAquisicao,
+          documento: item.documento,
+          tipoAquisicao: item.tipoAquisicao,
+          currentSpace: item.space ? { id: item.space.id, name: item.space.name } : null,
         },
-        history: item.history.map(formatHistoryEntry),
+        history: item.history.map((h) => formatHistoryEntry(h, nameMap)),
       });
     } catch (err) {
       console.error("Error loading item history:", err);
       res.status(500).json({ error: "Erro ao carregar histórico" });
+    }
+  },
+);
+
+// ─── GET /api/audit/items — listagem e busca de itens do inventário ───────────
+router.get(
+  "/items",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryRoles("ADMIN_CICLO"),
+  async (req, res) => {
+    try {
+      const { q = "", status, page = "1", limit = "40" } = req.query;
+      const inventoryId = req.inventoryId;
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+
+      const where = { inventoryId };
+
+      if (q.trim()) {
+        const norm = q.trim().toLowerCase();
+        where.OR = [
+          { patrimonio: { contains: norm } },
+          { descricao: { contains: norm } },
+        ];
+      }
+
+      if (status && ["SIM", "NAO", "PENDENTE"].includes(status)) {
+        where.statusEncontrado = status;
+      }
+
+      const [total, items] = await Promise.all([
+        prisma.item.count({ where }),
+        prisma.item.findMany({
+          where,
+          select: {
+            id: true,
+            patrimonio: true,
+            descricao: true,
+            statusEncontrado: true,
+            condicaoVisual: true,
+            valor: true,
+            space: { select: { id: true, name: true } },
+            history: {
+              orderBy: { createdAt: "desc" },
+              take: 1,
+              select: { action: true, createdBy: true, createdAt: true },
+            },
+          },
+          orderBy: [{ patrimonio: "asc" }],
+          skip,
+          take: parseInt(limit),
+        }),
+      ]);
+
+      // Resolve names for last actor
+      const lastActors = [...new Set(items.map((i) => i.history[0]?.createdBy).filter(Boolean))];
+      const nameMap = await buildNameMap(lastActors);
+
+      res.json({
+        total,
+        page: parseInt(page),
+        totalPages: Math.ceil(total / parseInt(limit)),
+        items: items.map((item) => {
+          const last = item.history[0];
+          return {
+            id: item.id,
+            patrimonio: item.patrimonio,
+            descricao: item.descricao,
+            statusEncontrado: item.statusEncontrado,
+            condicaoVisual: item.condicaoVisual,
+            valor: item.valor,
+            currentSpace: item.space ? { id: item.space.id, name: item.space.name } : null,
+            lastAction: last
+              ? { action: last.action, createdBy: nameMap[last.createdBy] || last.createdBy, createdAt: last.createdAt }
+              : null,
+          };
+        }),
+      });
+    } catch (err) {
+      console.error("Error listing items:", err);
+      res.status(500).json({ error: "Erro ao listar itens" });
     }
   },
 );

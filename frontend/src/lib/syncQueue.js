@@ -86,6 +86,9 @@ function generateActionId() {
   return `fallback-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+// Mutex: impede execuções concorrentes de processQueue
+let isProcessing = false;
+
 // Inicializar fila do IndexedDB
 if (isBrowser) {
   localforage.getItem(QUEUE_KEY).then((stored) => {
@@ -135,7 +138,8 @@ async function saveQueue() {
 }
 
 async function processQueue() {
-  if (!isBrowser || !isOnline || queue.length === 0) return;
+  if (isProcessing || !isBrowser || !isOnline || queue.length === 0) return;
+  isProcessing = true;
 
   const api = process.env.NEXT_PUBLIC_API_URL || "/api";
   const token = localStorage.getItem("token");
@@ -217,6 +221,7 @@ async function processQueue() {
       break; // Para na falha, tenta depois
     }
   }
+  isProcessing = false;
 }
 
 // Hook simplificado para debounce + auto-save
