@@ -189,6 +189,7 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
         patrimonio: true,
         descricao: true,
         spaceId: true,
+        statusEncontrado: true,
         space: {
           select: {
             id: true,
@@ -276,6 +277,7 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
         descricao: item.descricao,
         spaceId: item.spaceId,
         spaceName: item.space?.name || "Sem localização",
+        statusEncontrado: item.statusEncontrado,
         spaceIsFinalized: item.space?.isFinalized || false,
         spaceIsVerifiedByRevisor: item.space?.isVerifiedByRevisor || false,
         itemGroupId: item.itemGroupId || null,
@@ -474,7 +476,7 @@ router.post(
         where: { id: item.spaceId },
         select: { isFinalized: true },
       });
-      if (sourceSpace?.isFinalized) {
+      if (sourceSpace?.isFinalized && item.statusEncontrado !== "NAO") {
         return res
           .status(409)
           .json({
@@ -646,11 +648,14 @@ router.post(
         select: { isFinalized: true },
       });
       if (sourceSpace?.isFinalized) {
-        return res
-          .status(409)
-          .json({
-            error: "Esta sala está finalizada e não pode ter itens removidos",
-          });
+        const allUnfound = items.every((i) => i.statusEncontrado === "NAO");
+        if (!allUnfound) {
+          return res
+            .status(409)
+            .json({
+              error: "Esta sala está finalizada e não pode ter itens removidos",
+            });
+        }
       }
 
       if (items.length === 0) {

@@ -1889,7 +1889,7 @@ export default function RoomPage() {
                   <ul className="border rounded-lg divide-y max-h-64 overflow-auto">
                     {searchResults.map((candidate) => {
                       const isInCurrentRoom = candidate.spaceId === spaceId;
-                      const isSealed = !isInCurrentRoom && candidate.spaceIsFinalized;
+                      const isSealed = !isInCurrentRoom && candidate.spaceIsFinalized && candidate.statusEncontrado !== "NAO";
                       const isRevisorVerified = candidate.spaceIsVerifiedByRevisor;
 
                       return (
