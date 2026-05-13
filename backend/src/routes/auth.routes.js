@@ -61,16 +61,26 @@ router.post("/login", loginLimiter, async (req, res) => {
       console.error("Native admin membership check failed:", membershipError);
     }
 
+    // Lê o lastSessionAt ANTES do upsert para devolver como previousSessionAt
+    const existingUser = await prisma.user.findUnique({
+      where: { samAccountName: normalizedSam },
+      select: { lastSessionAt: true },
+    });
+    const previousSessionAt = existingUser?.lastSessionAt ?? null;
+
+    const now = new Date();
     const user = await prisma.user.upsert({
       where: { samAccountName: normalizedSam },
       update: {
         fullName: shouldUpdateFullName ? resolvedFullName : undefined,
         role: isNativeAdmin ? "ADMIN" : undefined,
+        lastSessionAt: now,
       },
       create: {
         samAccountName: normalizedSam,
         fullName: resolvedFullName || normalizedSam,
         role: isNativeAdmin ? "ADMIN" : "CONFERENTE",
+        lastSessionAt: now,
       },
     });
 
@@ -93,6 +103,7 @@ router.post("/login", loginLimiter, async (req, res) => {
         id: defaultInventory.id,
         name: defaultInventory.name,
       },
+      previousSessionAt,
     });
   } catch (err) {
     console.error("Login error:", err);

@@ -14,6 +14,7 @@ import eventsRoutes from "./routes/events.routes.js";
 import { ensureSpaceCountersTable } from "./services/metrics.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import backupRoutes from "./routes/backup.routes.js";
+import userRoutes from "./routes/user.routes.js";
 import { startBackupScheduler, ensureBackupDir, clearStaleLocks } from "./services/backup.js";
 import { requireNotLocked } from "./middleware/lock.js";
 import { eventLogMiddleware } from "./middleware/event-log.js";
@@ -80,6 +81,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/events", eventsRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/backups", backupRoutes);
+app.use("/api/users", userRoutes);
 
 // Health check
 app.get("/api/health", (req, res) =>

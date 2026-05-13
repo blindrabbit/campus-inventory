@@ -9,15 +9,16 @@ datasource db {
 }
 
 model User {
-  id             String   @id @default(cuid())
-  samAccountName String   @unique
+  id             String    @id @default(cuid())
+  samAccountName String    @unique
   fullName       String
-  role           String   @default("CONFERENTE")
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  role           String    @default("CONFERENTE")
+  lastSessionAt  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
   inventoriesCreated Inventory[] @relation("InventoryCreatedBy")
   inventoryLinks     InventoryUser[]
-  
+
   @@map("users")
 }
 
@@ -63,14 +64,15 @@ model InventoryStatusHistory {
 }
 
 model InventoryUser {
-  id          String   @id @default(cuid())
-  inventoryId String
-  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
-  userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role        String   @default("CONFERENTE")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                 String   @id @default(cuid())
+  inventoryId        String
+  inventory          Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role               String   @default("CONFERENTE")
+  lastVisitedSpaceId String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   @@unique([inventoryId, userId])
   @@index([userId])
@@ -176,6 +178,8 @@ model ItemHistorico {
   metadata    String?
   createdAt   DateTime @default(now())
 
+  @@index([createdBy, createdAt])
+  @@index([itemId])
   @@map("item_history")
 }
 

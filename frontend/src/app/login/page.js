@@ -30,6 +30,12 @@ export default function LoginPage() {
           JSON.stringify(data.activeInventory),
         );
       }
+      // Guarda a sessão anterior para o banner de retomada no dashboard
+      if (data.previousSessionAt) {
+        localStorage.setItem("previousSessionAt", data.previousSessionAt);
+      } else {
+        localStorage.removeItem("previousSessionAt");
+      }
       router.push("/inventories");
     } catch (err) {
       setError(err.response?.data?.error || "Erro ao fazer login");

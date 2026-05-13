@@ -35,15 +35,18 @@ export function useSSE({ inventoryId, spaceId, enabled = true }) {
     // Catch-all: forward known event types to registered handlers
     const knownEvents = [
       "item_relocated",
+      "item_left_space",
       "item_checked",
       "item_unfound",
       "item_unchecked",
       "item_verified",
       "group_relocated",
+      "group_left_space",
       "item_restored",
       "batch_checked",
       "batch_unfound",
       "batch_relocated",
+      "batch_left_space",
       "space_auto_reverted",
     ];
 

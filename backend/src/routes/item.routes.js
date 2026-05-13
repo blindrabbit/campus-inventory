@@ -448,6 +448,8 @@ router.post(
           lastKnownSpaceId: true,
           inventoryId: true,
           statusEncontrado: true,
+          patrimonio: true,
+          descricao: true,
         },
       });
 
@@ -457,7 +459,7 @@ router.post(
 
       const targetSpace = await prisma.space.findFirst({
         where: { id: targetSpaceId, inventoryId: req.inventoryId },
-        select: { id: true, isFinalized: true },
+        select: { id: true, name: true, isFinalized: true },
       });
 
       if (!targetSpace) {
@@ -474,7 +476,7 @@ router.post(
 
       const sourceSpace = await prisma.space.findUnique({
         where: { id: item.spaceId },
-        select: { isFinalized: true },
+        select: { id: true, name: true, isFinalized: true },
       });
       if (sourceSpace?.isFinalized && item.statusEncontrado !== "NAO") {
         return res
@@ -559,9 +561,31 @@ router.post(
         excludeClientId,
         payload: {
           itemId,
+          patrimonio: item.patrimonio,
+          descricao: item.descricao,
           fromSpaceId: item.spaceId,
+          fromSpaceName: sourceSpace?.name,
           toSpaceId: targetSpaceId,
-          action: "REALOCADO",
+          toSpaceName: targetSpace.name,
+          user: user.fullName || user.sub,
+          timestamp: movedAt,
+        },
+      });
+
+      // Notify users in the SOURCE space that an item left
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: item.spaceId,
+        action: "item_left_space",
+        excludeClientId,
+        payload: {
+          itemId,
+          patrimonio: item.patrimonio,
+          descricao: item.descricao,
+          fromSpaceId: item.spaceId,
+          fromSpaceName: sourceSpace?.name,
+          toSpaceId: targetSpaceId,
+          toSpaceName: targetSpace.name,
           user: user.fullName || user.sub,
           timestamp: movedAt,
         },
@@ -618,7 +642,7 @@ router.post(
       const [targetSpace, items] = await Promise.all([
         prisma.space.findFirst({
           where: { id: targetSpaceId, inventoryId: req.inventoryId },
-          select: { id: true, isFinalized: true },
+          select: { id: true, name: true, isFinalized: true },
         }),
         prisma.item.findMany({
           where: {
@@ -645,7 +669,7 @@ router.post(
 
       const sourceSpace = await prisma.space.findUnique({
         where: { id: sourceSpaceId },
-        select: { isFinalized: true },
+        select: { id: true, name: true, isFinalized: true },
       });
       if (sourceSpace?.isFinalized) {
         const allUnfound = items.every((i) => i.statusEncontrado === "NAO");
@@ -720,10 +744,28 @@ router.post(
         action: "group_relocated",
         excludeClientId,
         payload: {
-          itemIds: itemIds,
+          itemIds,
           fromSpaceId: sourceSpaceId,
+          fromSpaceName: sourceSpace?.name,
           toSpaceId: targetSpaceId,
-          action: "REALOCADO",
+          toSpaceName: targetSpace.name,
+          user: user.fullName || user.sub,
+          count: items.length,
+          timestamp: movedAt,
+        },
+      });
+
+      // Notify users in the SOURCE space that items left
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: sourceSpaceId,
+        action: "group_left_space",
+        excludeClientId,
+        payload: {
+          fromSpaceId: sourceSpaceId,
+          fromSpaceName: sourceSpace?.name,
+          toSpaceId: targetSpaceId,
+          toSpaceName: targetSpace.name,
           user: user.fullName || user.sub,
           count: items.length,
           timestamp: movedAt,
@@ -1421,7 +1463,7 @@ router.post(
       const [space, targetSpace] = await Promise.all([
         prisma.space.findFirst({
           where: { id: spaceId, inventoryId: req.inventoryId },
-          select: { id: true, isFinalized: true },
+          select: { id: true, name: true, isFinalized: true },
         }),
         prisma.space.findFirst({
           where: { id: targetSpaceId, inventoryId: req.inventoryId },
@@ -1532,8 +1574,26 @@ router.post(
         excludeClientId,
         payload: {
           fromSpaceId: spaceId,
+          fromSpaceName: space.name,
           toSpaceId: targetSpaceId,
-          action: "REALOCADO",
+          toSpaceName: targetSpace.name,
+          user: user.fullName || user.sub,
+          count: matchedItems.length,
+          timestamp: movedAt,
+        },
+      });
+
+      // Notify users in the SOURCE space that items left
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: spaceId,
+        action: "batch_left_space",
+        excludeClientId,
+        payload: {
+          fromSpaceId: spaceId,
+          fromSpaceName: space.name,
+          toSpaceId: targetSpaceId,
+          toSpaceName: targetSpace.name,
           user: user.fullName || user.sub,
           count: matchedItems.length,
           timestamp: movedAt,

@@ -111,6 +111,21 @@ export default function RoomPage() {
   const [multiMoveTargetSpaceId, setMultiMoveTargetSpaceId] = useState("");
   const longPressTimerRef = useRef(null);
   const [showFoundItems, setShowFoundItems] = useState(true);
+
+  // Animação de saída dos cards: { [itemId]: "found" | "unfound" | "moving" }
+  const [exitingItems, setExitingItems] = useState({});
+
+  const triggerItemExit = useCallback((itemId, type, callback) => {
+    setExitingItems((prev) => ({ ...prev, [itemId]: type }));
+    setTimeout(() => {
+      setExitingItems((prev) => {
+        const next = { ...prev };
+        delete next[itemId];
+        return next;
+      });
+      callback();
+    }, 340);
+  }, []);
   const [showRelocatedItems, setShowRelocatedItems] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState({});
   const [itemSearchFilter, setItemSearchFilter] = useState("");
@@ -146,49 +161,80 @@ export default function RoomPage() {
       return;
     }
 
+    const d = lastEvent.data;
+    const itemLabel = d.patrimonio ? `Patrimônio ${d.patrimonio}` : (d.descricao ? d.descricao : "Item");
+
     const config = {
       item_relocated: {
         title: "📦 Item movido para esta sala",
-        msg: `Um item foi movido para cá por ${lastEvent.data.user}.`,
+        msg: `${itemLabel} movido por ${d.user}${d.fromSpaceName ? ` de "${d.fromSpaceName}"` : ""}.`,
+      },
+      item_left_space: {
+        title: "📤 Item saiu desta sala",
+        msg: `${itemLabel} movido por ${d.user} para "${d.toSpaceName || "outro local"}".`,
+        onReceive: () => setItems((prev) => prev.filter((i) => i.id !== d.itemId)),
       },
       group_relocated: {
-        title: `📦 ${lastEvent.data.count} ite${lastEvent.data.count > 1 ? "ns" : "m"} movido${lastEvent.data.count > 1 ? "s" : ""} para esta sala`,
-        msg: `Grupo movido por ${lastEvent.data.user}.`,
+        title: `📦 ${d.count} item${d.count > 1 ? "ns" : ""} movido${d.count > 1 ? "s" : ""} para esta sala`,
+        msg: `Grupo movido por ${d.user}${d.fromSpaceName ? ` de "${d.fromSpaceName}"` : ""}.`,
+      },
+      group_left_space: {
+        title: `📤 ${d.count} item${d.count > 1 ? "ns" : ""} saiu${d.count > 1 ? "ram" : ""} desta sala`,
+        msg: `Grupo movido por ${d.user} para "${d.toSpaceName || "outro local"}".`,
       },
       item_checked: {
         title: "✅ Item conferido",
-        msg: `${lastEvent.data.user} marcou um item como encontrado nesta sala.`,
+        msg: `${d.user} marcou um item como encontrado nesta sala.`,
       },
       batch_checked: {
         title: "✅ Conferência em massa",
-        msg: `${lastEvent.data.user} conferiu ${lastEvent.data.count} itens nesta sala.`,
+        msg: `${d.user} conferiu ${d.count} itens nesta sala.`,
       },
       batch_unfound: {
         title: "Itens não localizados em massa",
-        msg: `${lastEvent.data.user} marcou ${lastEvent.data.count} itens como não localizados nesta sala.`,
+        msg: `${d.user} marcou ${d.count} itens como não localizados nesta sala.`,
       },
       batch_relocated: {
-        title: "📦 Itens movidos em massa",
-        msg: `${lastEvent.data.user} moveu ${lastEvent.data.count} itens para esta sala.`,
+        title: "📦 Itens movidos em massa para esta sala",
+        msg: `${d.user} moveu ${d.count} itens${d.fromSpaceName ? ` de "${d.fromSpaceName}"` : ""}.`,
+      },
+      batch_left_space: {
+        title: "📤 Itens movidos em massa desta sala",
+        msg: `${d.user} moveu ${d.count} itens para "${d.toSpaceName || "outro local"}".`,
       },
       item_restored: {
         title: "🔄 Item restaurado",
-        msg: `${lastEvent.data.user} restaurou um item para esta sala.`,
+        msg: `${d.user} restaurou um item para esta sala.`,
       },
       space_auto_reverted: {
         title: "⚠️ Sala reaberta pelo revisor",
-        msg: `Item #${lastEvent.data.patrimonio} não localizado — sala retornada para conferência.`,
+        msg: `Item #${d.patrimonio} não localizado — sala retornada para conferência.`,
       },
     };
 
     const c = config[lastEvent.type];
     if (c) {
+      if (c.onReceive) c.onReceive();
       showToast({ type: lastEvent.type === "space_auto_reverted" ? "warning" : "info", title: c.title, message: c.msg });
-      if (loadDataRef.current) {
-        loadDataRef.current(token, currentInventoryId);
-      }
+      loadDataRef.current(token, currentInventoryId);
     }
   }, [lastEvent, showToast, currentInventoryId]);
+
+  // Registra a última sala visitada — fire-and-forget, sem bloquear a UI
+  useEffect(() => {
+    if (!spaceId) return;
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    if (!token || !inventoryId) return;
+
+    axios
+      .patch(
+        `${API}/users/me/last-visited`,
+        { spaceId, inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      .catch(() => {});
+  }, [spaceId]);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -815,46 +861,39 @@ export default function RoomPage() {
   const handleCheck = useCallback(
     (itemId, condicao) => {
       setSaving(true);
-      autoSave(() => {
-        const inventoryId = localStorage.getItem("activeInventoryId");
-        const itemBeforeUpdate = items.find((i) => i.id === itemId);
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const itemBeforeUpdate = items.find((i) => i.id === itemId);
 
+      autoSave(() => {
         enqueueAction({
           endpoint: "/items/check",
           method: "POST",
           payload: { itemId, condicao, inventoryId, connectionId },
         });
+      });
 
+      if (itemBeforeUpdate) {
+        registerLocalHistoryAction({ action: "ENCONTRADO", item: itemBeforeUpdate });
+      }
+
+      triggerItemExit(itemId, "found", () => {
         setItems((prev) =>
           prev.map((i) =>
             i.id === itemId
-              ? {
-                  ...i,
-                  statusEncontrado: "SIM",
-                  condicaoVisual: condicao,
-                  // Limpar meta.isRelocated quando confirmar presença
-                  meta: { ...i.meta, isRelocated: false },
-                }
+              ? { ...i, statusEncontrado: "SIM", condicaoVisual: condicao, meta: { ...i.meta, isRelocated: false } }
               : i,
           ),
         );
-
-        if (itemBeforeUpdate) {
-          registerLocalHistoryAction({
-            action: "ENCONTRADO",
-            item: itemBeforeUpdate,
-          });
-        }
-
         setSaving(false);
       });
     },
-    [autoSave, items, registerLocalHistoryAction],
+    [autoSave, items, registerLocalHistoryAction, triggerItemExit],
   );
 
   const handleRelocate = useCallback(
     (itemId, targetSpaceId) => {
       setSaving(true);
+      setRelocateModal(null);
       autoSave(() => {
         const inventoryId = localStorage.getItem("activeInventoryId");
         enqueueAction({
@@ -862,14 +901,13 @@ export default function RoomPage() {
           method: "POST",
           payload: { itemId, targetSpaceId, inventoryId, connectionId },
         });
-
-        // Atualiza UI localmente
+      });
+      triggerItemExit(itemId, "moving", () => {
         setItems((prev) => prev.filter((i) => i.id !== itemId));
-        setRelocateModal(null);
         setSaving(false);
       });
     },
-    [autoSave],
+    [autoSave, triggerItemExit],
   );
 
   const confirmFinalize = async () => {
@@ -1002,34 +1040,41 @@ export default function RoomPage() {
       return;
     }
 
-    // Realocação simples de item único
+    // Realocação simples de item único — chama API diretamente para recarregar a sala após mover
     setSaving(true);
-    autoSave(() => {
-      enqueueAction({
-        endpoint: "/items/relocate",
-        method: "POST",
-        payload: {
+    try {
+      await axios.post(
+        `${API}/items/relocate`,
+        {
           itemId: pendingMoveCandidate.id,
           targetSpaceId: spaceId,
           inventoryId,
           connectionId,
         },
-      });
-
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
       setSearchResults((prev) =>
         prev.filter((result) => result.id !== pendingMoveCandidate.id),
       );
       setSearchTerm("");
       setPendingMoveCandidate(null);
       setGroupMoveCount("");
-      setSaving(false);
+      loadData(token, inventoryId);
       showToast({
         type: "success",
-        title: "Movimentação registrada",
-        message: "A realocação foi enviada para sincronização.",
+        title: "Item movido para esta sala",
+        message: `${pendingMoveCandidate.patrimonio ? `Patrimônio ${pendingMoveCandidate.patrimonio}` : "Item"} realocado com sucesso.`,
       });
-    });
-  }, [autoSave, groupMoveCount, pendingMoveCandidate, showToast, spaceId]);
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha na realocação",
+        message: err.response?.data?.error || "Não foi possível realocar o item.",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }, [groupMoveCount, pendingMoveCandidate, showToast, spaceId, connectionId]);
 
   const handleMoveToCurrentRoom = (candidate) => {
     setPendingMoveCandidate(candidate);
@@ -1069,8 +1114,6 @@ export default function RoomPage() {
       },
     });
 
-    setItems((prev) => prev.filter((i) => i.id !== itemToRemove.id));
-
     registerLocalHistoryAction({
       action: "NAO_LOCALIZADO",
       item: itemToRemove,
@@ -1079,6 +1122,10 @@ export default function RoomPage() {
 
     setPendingUnfoundItem(null);
     setRelocateModal(null);
+
+    triggerItemExit(itemToRemove.id, "unfound", () => {
+      setItems((prev) => prev.filter((i) => i.id !== itemToRemove.id));
+    });
 
     showToast({
       type: "info",
@@ -2441,6 +2488,11 @@ export default function RoomPage() {
                               onClick={() =>
                                 selectionMode && toggleItemSelection(item.id)
                               }
+                              style={
+                                exitingItems[item.id]
+                                  ? { animation: `item-exit-${exitingItems[item.id]} 0.34s ease forwards`, pointerEvents: "none" }
+                                  : undefined
+                              }
                               className={`relative rounded-lg border-l-4 transition-all select-none ${
                                 selectionMode && selectedItemIds.has(item.id)
                                   ? "ring-2 ring-blue-500 ring-offset-1"
@@ -2746,6 +2798,11 @@ export default function RoomPage() {
                   }
                 }}
                 onClick={() => selectionMode && toggleItemSelection(item.id)}
+                style={
+                  exitingItems[item.id]
+                    ? { animation: `item-exit-${exitingItems[item.id]} 0.34s ease forwards`, pointerEvents: "none" }
+                    : undefined
+                }
                 className={`relative rounded-xl shadow border-l-4 transition-all select-none ${
                   selectionMode && selectedItemIds.has(item.id)
                     ? "ring-2 ring-blue-500 ring-offset-1"

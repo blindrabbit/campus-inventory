@@ -41,6 +41,35 @@ const STATUS_BADGE_STYLES = {
   FINALIZADO: "bg-indigo-100 text-indigo-700 ring-indigo-200",
   CANCELADO: "bg-rose-100 text-rose-700 ring-rose-200",
 };
+
+// Fase visual do card de espaço (determina cor e ordem de exibição)
+const SPACE_PHASE_ORDER = { NAO_INICIADO: 0, INICIADO: 1, FINALIZADO: 2, CONFERIDO: 3 };
+const SPACE_PHASE_STYLES = {
+  NAO_INICIADO: {
+    card: "border-gray-100 bg-white",
+    title: "group-hover:text-blue-600",
+    arrow: "text-blue-600",
+    footerBorder: "border-gray-100",
+  },
+  INICIADO: {
+    card: "border-amber-200 bg-amber-50/50",
+    title: "group-hover:text-amber-700",
+    arrow: "text-amber-600",
+    footerBorder: "border-amber-100",
+  },
+  FINALIZADO: {
+    card: "border-emerald-200 bg-emerald-50/50",
+    title: "group-hover:text-emerald-700",
+    arrow: "text-emerald-600",
+    footerBorder: "border-emerald-100",
+  },
+  CONFERIDO: {
+    card: "border-purple-200 bg-purple-50/50",
+    title: "group-hover:text-purple-700",
+    arrow: "text-purple-600",
+    footerBorder: "border-purple-100",
+  },
+};
 const DASHBOARD_TABS = [
   {
     id: "espacos",
@@ -140,6 +169,13 @@ export default function DashboardPage() {
   const [backupDeleteId, setBackupDeleteId] = useState(null);
   const [backupConfirmAction, setBackupConfirmAction] = useState(null); // "restore" | "delete"
   const [dashboardRecentEvents, setDashboardRecentEvents] = useState([]);
+
+  // Banner de retomada de sessão
+  const [sessionSummary, setSessionSummary] = useState(null);
+  const [sessionBannerOpen, setSessionBannerOpen] = useState(true);
+  // Tracks which inventoryId already had its session summary loaded, so we don't repeat it
+  const sessionSummaryLoadedForRef = useRef(null);
+
   const router = useRouter();
   const { showToast } = useToast();
 
@@ -283,27 +319,21 @@ export default function DashboardPage() {
     return user?.role === "ADMIN" || activeInventory?.role === "ADMIN_CICLO";
   }, [user, activeInventory]);
 
+  const getSpacePhase = (space) => {
+    if (space.isVerified && space.confirmedBy) return "CONFERIDO";
+    if (space.isFinalized || space.executionStatus === "FINALIZADO") return "FINALIZADO";
+    if (space.startedAt || space.executionStatus === "INICIADO") return "INICIADO";
+    return "NAO_INICIADO";
+  };
+
   const sortedSpaces = useMemo(() => {
     return [...spaces].sort((a, b) => {
-      const aStarted =
-        Boolean(a.startedAt) ||
-        a.executionStatus === "INICIADO" ||
-        a.executionStatus === "FINALIZADO" ||
-        a.isFinalized;
-      const bStarted =
-        Boolean(b.startedAt) ||
-        b.executionStatus === "INICIADO" ||
-        b.executionStatus === "FINALIZADO" ||
-        b.isFinalized;
-
-      if (aStarted !== bStarted) {
-        return aStarted ? 1 : -1;
-      }
-
-      return (a.name || "").localeCompare(b.name || "", "pt-BR", {
-        sensitivity: "base",
-      });
+      const phaseA = SPACE_PHASE_ORDER[getSpacePhase(a)];
+      const phaseB = SPACE_PHASE_ORDER[getSpacePhase(b)];
+      if (phaseA !== phaseB) return phaseA - phaseB;
+      return (a.name || "").localeCompare(b.name || "", "pt-BR", { sensitivity: "base" });
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaces]);
 
   const fmtDate = (value) =>
@@ -644,6 +674,43 @@ export default function DashboardPage() {
 
     loadForInventory();
   }, [activeInventory?.id, activeInventory?.role, user?.role]);
+
+  // Carrega o resumo da sessão anterior independentemente do restante do dashboard.
+  // Usa um ref para garantir que só roda UMA vez por inventário por montagem do componente.
+  useEffect(() => {
+    const inventoryId = activeInventory?.id;
+    if (!inventoryId) return;
+    if (sessionSummaryLoadedForRef.current === inventoryId) return;
+
+    const token = localStorage.getItem("token");
+    const previousSessionAt = localStorage.getItem("previousSessionAt");
+    if (!token || !previousSessionAt) return;
+
+    const sessionAge = Date.now() - new Date(previousSessionAt).getTime();
+    const MAX_AGE_MS = 72 * 60 * 60 * 1000;
+
+    if (sessionAge > MAX_AGE_MS) {
+      localStorage.removeItem("previousSessionAt");
+      return;
+    }
+
+    sessionSummaryLoadedForRef.current = inventoryId;
+
+    axios
+      .get(`${API}/users/me/session-summary`, {
+        params: { inventoryId, since: previousSessionAt },
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .then(({ data }) => {
+        if (data.totalActions > 0) {
+          setSessionSummary(data);
+          setSessionBannerOpen(true);
+        }
+      })
+      .catch((err) => {
+        console.error("[session-summary] Erro ao buscar resumo:", err?.response?.data || err?.message);
+      });
+  }, [activeInventory?.id]);
 
   const loadSpaces = async (token, inventoryId) => {
     try {
@@ -1446,6 +1513,93 @@ export default function DashboardPage() {
         </div>
       </header>
 
+      {/* Banner de retomada de sessão */}
+      {sessionSummary && sessionBannerOpen && (
+        <div className="border-b border-indigo-100 bg-indigo-50">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                {/* Cabeçalho do banner */}
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-base">📋</span>
+                  <span className="text-sm font-semibold text-indigo-900">
+                    Sessão anterior •{" "}
+                    {new Date(localStorage.getItem("previousSessionAt")).toLocaleString("pt-BR", {
+                      day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+                    })}
+                  </span>
+                  <span className="text-xs text-indigo-600">
+                    {sessionSummary.totalActions} {sessionSummary.totalActions !== 1 ? "ações" : "ação"} em{" "}
+                    {sessionSummary.spaceSummary.length} sala{sessionSummary.spaceSummary.length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+
+                {/* Lista de salas */}
+                <div className="flex flex-wrap gap-2">
+                  {sessionSummary.spaceSummary.slice(0, 5).map((s) => {
+                    const parts = [];
+                    if (s.actions.ENCONTRADO) parts.push(`${s.actions.ENCONTRADO} encontrado${s.actions.ENCONTRADO !== 1 ? "s" : ""}`);
+                    if (s.actions.NAO_LOCALIZADO) parts.push(`${s.actions.NAO_LOCALIZADO} não localizado${s.actions.NAO_LOCALIZADO !== 1 ? "s" : ""}`);
+                    if (s.actions.REALOCADO) parts.push(`${s.actions.REALOCADO} realocado${s.actions.REALOCADO !== 1 ? "s" : ""}`);
+                    const isLast = s.spaceId === sessionSummary.lastVisitedSpaceId;
+                    return (
+                      <button
+                        key={s.spaceId}
+                        type="button"
+                        onClick={() => router.push(`/room/${s.spaceId}`)}
+                        className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition hover:shadow-sm ${
+                          isLast
+                            ? "border-indigo-400 bg-indigo-100 text-indigo-800 hover:bg-indigo-200"
+                            : "border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50"
+                        }`}
+                      >
+                        {isLast && <span>▶</span>}
+                        <span className="font-semibold">{s.spaceName}</span>
+                        {parts.length > 0 && (
+                          <span className="text-indigo-500">· {parts.join(" · ")}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {sessionSummary.spaceSummary.length > 5 && (
+                    <span className="inline-flex items-center rounded-lg border border-indigo-100 bg-white px-3 py-1.5 text-xs text-indigo-500">
+                      +{sessionSummary.spaceSummary.length - 5} mais
+                    </span>
+                  )}
+                </div>
+
+                {/* Botão de retomar a última sala */}
+                {sessionSummary.lastVisitedSpaceId && (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      onClick={() => router.push(`/room/${sessionSummary.lastVisitedSpaceId}`)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-700"
+                    >
+                      ▶ Retomar: {sessionSummary.lastVisitedSpaceName}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Fechar */}
+              <button
+                type="button"
+                onClick={() => {
+                  setSessionBannerOpen(false);
+                  setSessionSummary(null);
+                  localStorage.removeItem("previousSessionAt");
+                }}
+                className="mt-0.5 shrink-0 rounded-md p-1 text-indigo-400 hover:bg-indigo-100 hover:text-indigo-700 transition"
+                aria-label="Fechar resumo de sessão"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Strategic panel moved to its own tab (Acompanhamento) */}
@@ -1588,6 +1742,8 @@ export default function DashboardPage() {
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {sortedSpaces.map((space) => {
               const phaseBadges = getSpacePhaseBadges(space);
+              const phase = getSpacePhase(space);
+              const phaseStyle = SPACE_PHASE_STYLES[phase];
               return (
                 <div
                   key={space.id}
@@ -1600,7 +1756,7 @@ export default function DashboardPage() {
                       router.push(`/room/${space.id}`);
                     }
                   }}
-                  className="group relative block cursor-pointer overflow-hidden rounded-xl border border-gray-100 bg-white shadow-md transition-all duration-300 hover:shadow-xl"
+                  className={`group relative block cursor-pointer overflow-hidden rounded-xl border shadow-md transition-all duration-300 hover:shadow-xl ${phaseStyle.card}`}
                 >
                   {canManageSpaces ? (
                     <button
@@ -1618,7 +1774,7 @@ export default function DashboardPage() {
                   ) : null}
                   <div className="p-6">
                     <div className="flex justify-between items-start mb-4">
-                      <h3 className="font-bold text-lg text-gray-900 group-hover:text-blue-600 transition line-clamp-2">
+                      <h3 className={`font-bold text-lg text-gray-900 transition line-clamp-2 ${phaseStyle.title}`}>
                         {space.name}
                       </h3>
                       <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
@@ -1647,11 +1803,11 @@ export default function DashboardPage() {
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between pt-4 border-t border-gray-100">
+                    <div className={`flex items-center justify-between pt-4 border-t ${phaseStyle.footerBorder}`}>
                       <span className="text-sm text-gray-500">
                         Clique para conferir
                       </span>
-                      <span className="inline-flex items-center text-blue-600 font-medium group-hover:translate-x-1 transition-transform">
+                      <span className={`inline-flex items-center font-medium group-hover:translate-x-1 transition-transform ${phaseStyle.arrow}`}>
                         {space.isFinalized ? "Visualizar" : "Iniciar"}
                         <svg
                           className="w-4 h-4 ml-1"
