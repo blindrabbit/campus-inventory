@@ -38,6 +38,11 @@ const HISTORY_ACTION_CONFIG = {
     badgeClass: "bg-orange-100 text-orange-700",
     defaultDirection: "INTERNO",
   },
+  DESFEITO_NAO_LOCALIZADO: {
+    label: "Não localizado desfeito",
+    badgeClass: "bg-orange-100 text-orange-700",
+    defaultDirection: "INTERNO",
+  },
 };
 
 // Utility function to normalize strings (remove accents)

@@ -922,21 +922,25 @@ export default function DashboardPage() {
           showToast({ type: "error", title: "Sala obrigatória", message: "Selecione a sala de destino." });
           return;
         }
-        await axios.post(
+        const { data: relocateResult } = await axios.post(
           `${API}/items/relocate`,
           { itemId: item.id, targetSpaceId, inventoryId },
           { headers: { Authorization: `Bearer ${token}` } },
         );
-        // Record visual condition via check (marks item as PENDENTE in target space)
-        await axios.post(
-          `${API}/items/${item.id}/check`,
-          { itemId: item.id, condicao, inventoryId },
-          { headers: { Authorization: `Bearer ${token}` }, params: { inventoryId } },
-        );
+        if (!relocateResult.undidUnfound) {
+          // Movimento real para outra sala: registra condição visual
+          await axios.post(
+            `${API}/items/${item.id}/check`,
+            { itemId: item.id, condicao, inventoryId },
+            { headers: { Authorization: `Bearer ${token}` }, params: { inventoryId } },
+          );
+        }
         showToast({
           type: "success",
-          title: "Item movido",
-          message: `Patrimônio #${item.patrimonio} realocado com sucesso.`,
+          title: relocateResult.undidUnfound ? "Marcação desfeita" : "Item movido",
+          message: relocateResult.undidUnfound
+            ? `Patrimônio #${item.patrimonio} voltou para pendente.`
+            : `Patrimônio #${item.patrimonio} realocado com sucesso.`,
         });
         setUnfoundActionModal(null);
         setUnfoundMoveTargetSpaceId("");
@@ -3182,40 +3186,60 @@ export default function DashboardPage() {
               >
                 <option value="">Selecione uma sala...</option>
                 {spaces
-                  .filter((s) => s.id !== unfoundActionModal?.item?.spaceId && !s.isFinalized)
-                  .map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
+                  .filter((s) => !s.isFinalized)
+                  .map((s) => {
+                    const isOrigin = s.id === unfoundActionModal?.item?.ultimoLocalConhecidoId;
+                    return (
+                      <option key={s.id} value={s.id}>
+                        {isOrigin ? `↩️ ${s.name} (desfazer — retornar ao local de origem)` : s.name}
+                      </option>
+                    );
+                  })}
               </select>
             </div>
 
-            <div>
-              <p className="mb-2 text-sm font-semibold text-slate-700">
-                Condição visual:
-              </p>
-              <div className="flex gap-2">
-                {[["BOM", "🟢 Bom"], ["REGULAR", "🟡 Regular"], ["RUIM", "🔴 Ruim"]].map(([val, label]) => (
-                  <button
-                    key={val}
-                    type="button"
-                    onClick={() => setUnfoundCondicao(val)}
-                    className={`flex-1 py-2 px-2 rounded-lg font-medium text-xs transition ${
-                      unfoundCondicao === val
-                        ? "bg-blue-600 text-white"
-                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
+            {unfoundMoveTargetSpaceId === unfoundActionModal?.item?.ultimoLocalConhecidoId ? (
+              <div className="rounded-lg bg-blue-50 p-3 border border-blue-200">
+                <p className="text-xs text-blue-800 font-medium">
+                  ↩️ O item voltará para pendente no local de origem — a marcação &quot;não localizado&quot; será desfeita.
+                </p>
               </div>
-            </div>
-
-            <div className="rounded-lg bg-amber-50 p-3 border border-amber-200">
-              <p className="text-xs text-amber-800">
-                O item será movido para a sala selecionada e ficará aguardando confirmação na sala de destino.
-              </p>
-            </div>
+            ) : unfoundMoveTargetSpaceId ? (
+              <>
+                <div>
+                  <p className="mb-2 text-sm font-semibold text-slate-700">
+                    Condição visual:
+                  </p>
+                  <div className="flex gap-2">
+                    {[["BOM", "🟢 Bom"], ["REGULAR", "🟡 Regular"], ["RUIM", "🔴 Ruim"]].map(([val, label]) => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => setUnfoundCondicao(val)}
+                        className={`flex-1 py-2 px-2 rounded-lg font-medium text-xs transition ${
+                          unfoundCondicao === val
+                            ? "bg-blue-600 text-white"
+                            : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-amber-50 p-3 border border-amber-200">
+                  <p className="text-xs text-amber-800">
+                    O item será movido para a sala selecionada e ficará aguardando confirmação na sala de destino.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div className="rounded-lg bg-amber-50 p-3 border border-amber-200">
+                <p className="text-xs text-amber-800">
+                  O item será movido para a sala selecionada e ficará aguardando confirmação na sala de destino.
+                </p>
+              </div>
+            )}
           </div>
         </ModalBody>
         <ModalFooter>
@@ -3242,7 +3266,11 @@ export default function DashboardPage() {
             disabled={savingUnfoundAction || !unfoundMoveTargetSpaceId}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            {savingUnfoundAction ? "Movendo..." : "Confirmar mover"}
+            {savingUnfoundAction
+              ? "Processando..."
+              : unfoundMoveTargetSpaceId === unfoundActionModal?.item?.ultimoLocalConhecidoId
+              ? "↩️ Desfazer não localizado"
+              : "Confirmar mover"}
           </button>
         </ModalFooter>
       </Modal>

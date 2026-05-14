@@ -11,6 +11,7 @@ const ACTION_CONFIG = {
   REALOCADO:                  { label: "Realocado",                icon: "📦", color: "text-violet-700",  bg: "bg-violet-50",   border: "border-violet-200" },
   DESFEITO_ENCONTRADO:        { label: "Conferência desfeita",     icon: "↩️", color: "text-amber-700",   bg: "bg-amber-50",    border: "border-amber-200" },
   ESTORNADO:                  { label: "Relocação desfeita",       icon: "↩️", color: "text-amber-700",   bg: "bg-amber-50",    border: "border-amber-200" },
+  DESFEITO_NAO_LOCALIZADO:    { label: "Não localizado desfeito",  icon: "↩️", color: "text-amber-700",   bg: "bg-amber-50",    border: "border-amber-200" },
   NAO_LOCALIZADO_VERIFICACAO: { label: "Não loc. na verificação",  icon: "⚠️", color: "text-red-700",     bg: "bg-red-50",      border: "border-red-200" },
   VERIFICADO:                 { label: "Verificado pelo revisor",  icon: "🔍", color: "text-purple-700",  bg: "bg-purple-50",   border: "border-purple-200" },
   REVERTED_ITEM_NOT_FOUND:    { label: "Sala revertida",           icon: "🔄", color: "text-slate-700",   bg: "bg-slate-50",    border: "border-slate-200" },

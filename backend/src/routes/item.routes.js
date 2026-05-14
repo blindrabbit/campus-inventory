@@ -487,6 +487,52 @@ router.post(
       }
 
       if (item.spaceId === targetSpaceId) {
+        // Caso especial: item marcado como NAO sendo "devolvido" ao seu próprio espaço
+        // — interpreta como desfazer o não-localizado, voltando para PENDENTE
+        if (item.statusEncontrado === "NAO") {
+          await prisma.$transaction(async (tx) => {
+            await tx.item.updateMany({
+              where: { id: itemId, inventoryId: req.inventoryId },
+              data: { statusEncontrado: "PENDENTE" },
+            });
+            await recordItemHistory(tx, {
+              itemId,
+              fromSpaceId: item.spaceId,
+              toSpaceId: item.spaceId,
+              action: "DESFEITO_NAO_LOCALIZADO",
+              createdBy: user.sub,
+            });
+          });
+
+          const excludeClientId = connectionId
+            ? `${req.inventoryId}:${user.sub}:${connectionId}`
+            : undefined;
+
+          broadcast({
+            inventoryId: req.inventoryId,
+            spaceId: item.spaceId,
+            action: "item_restored",
+            excludeClientId,
+            payload: {
+              itemId,
+              patrimonio: item.patrimonio,
+              descricao: item.descricao,
+              spaceId: item.spaceId,
+              action: "DESFEITO_NAO_LOCALIZADO",
+              user: user.fullName || user.sub,
+              timestamp: new Date(),
+            },
+          });
+
+          try {
+            await recomputeSpaceCounters(item.spaceId, req.inventoryId);
+          } catch (err) {
+            console.warn("Failed to recompute counters after undo-unfound:", err.message || err);
+          }
+
+          return res.json({ success: true, undidUnfound: true, message: "Marcação 'não localizado' desfeita — item retornou para pendente" });
+        }
+
         return res
           .status(400)
           .json({ error: "O item já está no espaço de destino informado" });

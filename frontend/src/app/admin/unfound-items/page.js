@@ -413,6 +413,7 @@ export default function UnfoundItemsPage() {
               <option value="NAO_LOCALIZADO">NAO_LOCALIZADO</option>
               <option value="REALOCADO">REALOCADO</option>
               <option value="ESTORNADO">ESTORNADO</option>
+              <option value="DESFEITO_NAO_LOCALIZADO">DESFEITO_NAO_LOCALIZADO</option>
             </select>
           </div>
 
