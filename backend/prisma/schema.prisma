@@ -111,7 +111,7 @@ model Space {
 
 model Item {
   id                String     @id @default(cuid())
-  patrimonio        String
+  patrimonio        String?
   descricao         String
   valor             Float?
   condicaoOriginal  String
@@ -128,13 +128,21 @@ model Item {
   tipoAquisicao     String?    @map("tipo_aquisicao")
   inventoryId       String?
   inventory         Inventory? @relation(fields: [inventoryId], references: [id], onDelete: SetNull)
-  
+
+  // Identificação alternativa (livros de acervo)
+  codigoBarras      String?    @map("codigo_barras")
+  codigoRFID        String?    @map("codigo_rfid")
+  numeroExemplar    String?    @map("numero_exemplar")
+  codigoExemplar    String?    @map("codigo_exemplar")
+  autores           String?
+  anoPublicacao     String?    @map("ano_publicacao")
+
   // Dados da conferência
   spaceId           String
   space             Space      @relation(fields: [spaceId], references: [id])
   lastKnownSpaceId  String?
   lastKnownSpace    Space?     @relation("ItemLastKnownSpace", fields: [lastKnownSpaceId], references: [id], onDelete: SetNull)
-  
+
   statusEncontrado  String     @default("NAO") @map("Encontrado")
   condicaoVisual    String?
   dataConferencia   DateTime?
@@ -148,16 +156,19 @@ model Item {
   // Grupos
   itemGroupId       String?
   itemGroup         ItemGroup? @relation(fields: [itemGroupId], references: [id], onDelete: SetNull)
-  
+
   // Relocações
   relocationIn      Relocation? @relation("ItemRelocation")
   history           ItemHistorico[]
-  
+
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
 
+  // patrimonio: NULL != NULL no PostgreSQL → múltiplos itens sem patrimônio são permitidos
   @@unique([inventoryId, patrimonio])
-  
+  // codigoBarras: cada exemplar tem código único por inventário
+  @@unique([inventoryId, codigoBarras])
+
   @@map("items")
 }
 

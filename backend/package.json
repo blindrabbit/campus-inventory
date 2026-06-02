@@ -9,6 +9,7 @@
     "start": "node src/server.js",
     "test": "node --test",
     "seed": "node scripts/seed-xlsx.js",
+    "seed:books": "node scripts/seed-books-xlsx.js",
     "promote-admin": "node scripts/promote-admin.js",
     "sync-ad-fullnames": "node scripts/sync-ad-fullnames.js",
     "dedup-sam-accounts": "node scripts/dedup-sam-accounts.js",

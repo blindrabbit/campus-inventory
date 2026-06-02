@@ -1647,13 +1647,22 @@ export default function DashboardPage() {
                     Auditoria
                   </button>
                   {user?.role === "ADMIN" && (
-                    <button
-                      type="button"
-                      onClick={() => router.push("/admin/event-log")}
-                      className="rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
-                    >
-                      Relatório de Eventos
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => router.push("/admin/dados")}
+                        className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
+                      >
+                        Dados
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => router.push("/admin/event-log")}
+                        className="rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
+                      >
+                        Relatório de Eventos
+                      </button>
+                    </>
                   )}
                 </div>
               ) : null}
@@ -1699,13 +1708,22 @@ export default function DashboardPage() {
                   Auditoria
                 </button>
                 {user?.role === "ADMIN" && (
-                  <button
-                    type="button"
-                    onClick={() => router.push("/admin/event-log")}
-                    className="w-full rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
-                  >
-                    Relatório de Eventos
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => router.push("/admin/dados")}
+                      className="w-full rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
+                    >
+                      Dados
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => router.push("/admin/event-log")}
+                      className="w-full rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
+                    >
+                      Relatório de Eventos
+                    </button>
+                  </>
                 )}
               </div>
             ) : null}

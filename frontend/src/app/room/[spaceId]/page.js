@@ -9,6 +9,7 @@ import ModalBody from "../../../components/Modal/ModalBody";
 import ModalFooter from "../../../components/Modal/ModalFooter";
 import ConfirmModal from "../../../components/ConfirmModal/ConfirmModal";
 import { useToast } from "../../../components/Toast/toastContext";
+import ScanningModeModal from "../../../components/ScanningModal/ScanningModeModal";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 
@@ -117,6 +118,11 @@ export default function RoomPage() {
   const longPressTimerRef = useRef(null);
   const [showFoundItems, setShowFoundItems] = useState(true);
 
+  // Modo de leitura (leitor de código de barras / RFID)
+  const [scanModalOpen, setScanModalOpen] = useState(false);
+  const [scanHistory, setScanHistory] = useState([]);
+  const [scanCurrentIndex, setScanCurrentIndex] = useState(-1);
+
   // Animação de saída dos cards: { [itemId]: "found" | "unfound" | "moving" }
   const [exitingItems, setExitingItems] = useState({});
 
@@ -210,6 +216,15 @@ export default function RoomPage() {
       item_restored: {
         title: "🔄 Item restaurado",
         msg: `${d.user} restaurou um item para esta sala.`,
+      },
+      item_scan_undone: {
+        title: "↩ Leitura desfeita",
+        msg: `${d.user} desfez a leitura de um item nesta sala.`,
+        onReceive: () => setItems((prev) => prev.filter((i) => i.id !== d.itemId)),
+      },
+      items_imported: {
+        title: "📥 Itens importados",
+        msg: `${d.count ?? "Novos"} item${d.count !== 1 ? "ns" : ""} adicionados a esta sala.`,
       },
       space_auto_reverted: {
         title: "⚠️ Sala reaberta pelo revisor",
@@ -1646,6 +1661,31 @@ export default function RoomPage() {
               <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-amber-400" />
             )}
           </button>
+          {!isViewer && (
+            <button
+              type="button"
+              onClick={() => {
+                setScanModalOpen(true);
+                if (scanHistory.length > 0) {
+                  setScanCurrentIndex(scanHistory.length - 1);
+                }
+              }}
+              className="ml-auto px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 flex items-center gap-1.5 transition-colors"
+            >
+              <span className="relative flex h-2 w-2">
+                {scanModalOpen && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
+                )}
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-white" />
+              </span>
+              Modo Leitura
+              {scanHistory.length > 0 && (
+                <span className="bg-white/20 text-xs px-1.5 py-0.5 rounded-full">
+                  {scanHistory.length}
+                </span>
+              )}
+            </button>
+          )}
         </div>
 
         {activeTab === "observacoes" ? (
@@ -2704,6 +2744,31 @@ export default function RoomPage() {
                                       </span>{" "}
                                       {item.fornecedor || "N/A"}
                                     </p>
+                                    {(item.codigoBarras || item.codigoRFID || item.autores) && (
+                                      <p>
+                                        {item.codigoBarras && (
+                                          <>
+                                            <span className="font-semibold">Cód. Barras:</span>{" "}
+                                            {item.codigoBarras}
+                                            {(item.codigoRFID || item.autores) && " | "}
+                                          </>
+                                        )}
+                                        {item.codigoRFID && (
+                                          <>
+                                            <span className="font-semibold">RFID:</span>{" "}
+                                            {item.codigoRFID}
+                                            {item.autores && " | "}
+                                          </>
+                                        )}
+                                        {item.autores && (
+                                          <>
+                                            <span className="font-semibold">Autores:</span>{" "}
+                                            {item.autores}
+                                            {item.anoPublicacao && ` (${item.anoPublicacao})`}
+                                          </>
+                                        )}
+                                      </p>
+                                    )}
                                     <p>
                                       <span className="font-semibold">
                                         Data Aquisição:
@@ -2841,8 +2906,17 @@ export default function RoomPage() {
                   >
                     <div className="flex flex-wrap items-center gap-2 mb-1">
                       <span className="font-bold text-lg">
-                        #{item.patrimonio}
+                        {item.patrimonio
+                          ? `#${item.patrimonio}`
+                          : item.codigoBarras
+                          ? item.codigoBarras
+                          : "—"}
                       </span>
+                      {!item.patrimonio && (
+                        <span className="inline-flex items-center gap-0.5 bg-indigo-100 text-indigo-700 text-xs font-medium px-1.5 py-0.5 rounded-full">
+                          📚 Acervo
+                        </span>
+                      )}
                       {item.verificationStatus ===
                         "NAO_LOCALIZADO_VERIFICACAO" && (
                         <span className="px-2 py-0.5 bg-red-200 text-red-800 text-xs rounded font-medium">
@@ -3520,6 +3594,30 @@ export default function RoomPage() {
           </div>
         </div>
       )}
+
+      {/* Modal de leitura por leitor de código de barras / RFID */}
+      <ScanningModeModal
+        isOpen={scanModalOpen}
+        onClose={() => setScanModalOpen(false)}
+        spaceId={spaceId}
+        connectionId={connectionId}
+        history={scanHistory}
+        currentIndex={scanCurrentIndex}
+        onHistoryChange={(newHistory) => {
+          setScanHistory(newHistory);
+          if (newHistory.length > 0 && scanCurrentIndex < 0) {
+            setScanCurrentIndex(0);
+          }
+        }}
+        onIndexChange={setScanCurrentIndex}
+        onScanEvent={() => {
+          const token       = localStorage.getItem("token");
+          const inventoryId = localStorage.getItem("activeInventoryId");
+          if (token && inventoryId && loadDataRef.current) {
+            loadDataRef.current(token, inventoryId);
+          }
+        }}
+      />
     </div>
   );
 }

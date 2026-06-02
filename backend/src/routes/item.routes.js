@@ -1,4 +1,6 @@
 import { Router } from "express";
+import multer from "multer";
+import ExcelJS from "exceljs";
 import { verifyJWT } from "../middleware/auth.js";
 import {
   requireInventoryAccess,
@@ -12,6 +14,30 @@ import { broadcast } from "../services/sse.js";
 import { recomputeSpaceCounters } from "../services/metrics.js";
 
 const router = Router();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+// Índices de coluna do export do sistema de biblioteca (1-based)
+const BOOK_COL = {
+  CODIGO_BARRAS:   2,   // B
+  CODIGO_EXEMPLAR: 3,   // C
+  NUMERO_EXEMPLAR: 16,  // P
+  PATRIMONIO:      32,  // AF
+  TITULO:          34,  // AH
+  AUTORES:         53,  // BA
+  ANO_PUBLICACAO:  59,  // BG
+};
+
+function bookCellText(row, colIndex) {
+  const cell = row.getCell(colIndex);
+  const v = cell.value;
+  if (v === null || v === undefined) return null;
+  if (typeof v === "object") return String(v.text ?? v.result ?? "").trim() || null;
+  return String(v).trim() || null;
+}
 
 function normalizePatrimonioNumber(value) {
   if (value === null || value === undefined) return null;
@@ -105,6 +131,11 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
       fornecedor: item.fornecedor,
       dataAquisicao: item.dataAquisicao,
       documento: item.documento,
+      codigoBarras: item.codigoBarras,
+      codigoRFID: item.codigoRFID,
+      autores: item.autores,
+      anoPublicacao: item.anoPublicacao,
+      numeroExemplar: item.numeroExemplar,
       statusEncontrado: item.statusEncontrado,
       condicaoVisual: item.condicaoVisual,
       dataConferencia: item.dataConferencia,
@@ -2002,6 +2033,548 @@ router.post(
     } catch (err) {
       console.error("Error in action-by-ids:", err);
       res.status(500).json({ error: "Erro ao processar ação em lote" });
+    }
+  },
+);
+
+// ─── POST /items/import-books — importa livros via upload de XLSX ───────────────
+// Campos do form: xlsxFile (file), spaceId (string), inventoryId (string)
+// Lógica:
+//   - Se tem patrimônio e item já existe no inventário → mescla (atualiza campos de acervo)
+//   - Se tem patrimônio mas não existe → cria item novo
+//   - Se não tem patrimônio mas tem codigoBarras → upsert por codigoBarras
+//   - Nenhum identificador → pula
+router.post(
+  "/import-books",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  upload.single("xlsxFile"),
+  async (req, res) => {
+    try {
+      const { spaceId } = req.body;
+      const inventoryId = req.inventoryId;
+
+      if (!req.file) return res.status(400).json({ error: "Arquivo XLSX não enviado" });
+      if (!spaceId)   return res.status(400).json({ error: "spaceId é obrigatório" });
+
+      const space = await prisma.space.findFirst({
+        where: { id: spaceId, inventoryId },
+        select: { id: true, name: true },
+      });
+      if (!space) return res.status(400).json({ error: "Sala não encontrada no inventário" });
+
+      // ── 1. Ler XLSX completamente em memória (síncrono após load) ─────────────
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(req.file.buffer);
+
+      const worksheet = workbook.worksheets[0];
+      if (!worksheet) return res.status(400).json({ error: "Nenhuma aba encontrada no arquivo XLSX" });
+
+      // Detectar coluna RFID (última coluna do cabeçalho após BG=59)
+      let maxCol = 0;
+      worksheet.getRow(1).eachCell({ includeEmpty: false }, (_, c) => { if (c > maxCol) maxCol = c; });
+      const COL_RFID = maxCol > BOOK_COL.ANO_PUBLICACAO ? maxCol : null;
+
+      // ── 2. Extrair linhas com dados (sem tocar no banco ainda) ───────────────
+      const rows = [];
+      worksheet.eachRow((row, rowIdx) => {
+        if (rowIdx === 1) return; // pular cabeçalho
+        const codigoBarras   = bookCellText(row, BOOK_COL.CODIGO_BARRAS);
+        const patrimonio     = bookCellText(row, BOOK_COL.PATRIMONIO);
+        const titulo         = bookCellText(row, BOOK_COL.TITULO);
+        if (!codigoBarras && !patrimonio) return; // linha sem identificador
+        rows.push({
+          rowIdx,
+          codigoBarras,
+          patrimonio,
+          titulo,
+          codigoExemplar: bookCellText(row, BOOK_COL.CODIGO_EXEMPLAR),
+          numeroExemplar: bookCellText(row, BOOK_COL.NUMERO_EXEMPLAR),
+          autores:        bookCellText(row, BOOK_COL.AUTORES),
+          anoPublicacao:  bookCellText(row, BOOK_COL.ANO_PUBLICACAO),
+          codigoRFID:     COL_RFID ? bookCellText(row, COL_RFID) : null,
+        });
+      });
+
+      const skipped = (worksheet.rowCount - 1) - rows.length;
+      console.log(`[IMPORT-BOOKS] ${rows.length} linhas com dados (${skipped} puladas)`);
+
+      // ── 3. Buscar existentes em lote ─────────────────────────────────────────
+      const patrimonios  = [...new Set(rows.filter(r => r.patrimonio).map(r => r.patrimonio))];
+      const codBarras    = [...new Set(rows.filter(r => r.codigoBarras).map(r => r.codigoBarras))];
+
+      const [existingByPat, existingByBarras] = await Promise.all([
+        patrimonios.length
+          ? prisma.item.findMany({
+              where: { inventoryId, patrimonio: { in: patrimonios } },
+              select: { id: true, patrimonio: true, descricao: true },
+            })
+          : [],
+        codBarras.length
+          ? prisma.item.findMany({
+              where: { inventoryId, codigoBarras: { in: codBarras } },
+              select: { id: true, codigoBarras: true },
+            })
+          : [],
+      ]);
+
+      const patMap     = new Map(existingByPat.map(i => [i.patrimonio, i]));
+      const barrasMap  = new Map(existingByBarras.map(i => [i.codigoBarras, i]));
+
+      // ── 4. Separar em "criar" e "mesclar" ────────────────────────────────────
+      const toCreate = [];
+      const toMerge  = []; // { id, data }
+      const errors   = [];
+
+      for (const r of rows) {
+        const bookFields = {
+          codigoBarras:   r.codigoBarras  || null,
+          codigoRFID:     r.codigoRFID    || null,
+          codigoExemplar: r.codigoExemplar || null,
+          numeroExemplar: r.numeroExemplar || null,
+          autores:        r.autores        || null,
+          anoPublicacao:  r.anoPublicacao  || null,
+        };
+
+        if (r.patrimonio) {
+          const existing = patMap.get(r.patrimonio);
+          if (existing) {
+            toMerge.push({ id: existing.id, data: { ...bookFields, descricao: existing.descricao || r.titulo || existing.descricao } });
+          } else {
+            toCreate.push({ patrimonio: r.patrimonio, descricao: r.titulo || "Sem título", condicaoOriginal: "BOM", inventoryId, spaceId: space.id, statusEncontrado: "PENDENTE", ...bookFields });
+          }
+        } else {
+          // Sem patrimônio → identificador é o codigoBarras
+          const existing = barrasMap.get(r.codigoBarras);
+          if (existing) {
+            toMerge.push({ id: existing.id, data: bookFields });
+          } else {
+            toCreate.push({ patrimonio: null, descricao: r.titulo || "Sem título", condicaoOriginal: "BOM", inventoryId, spaceId: space.id, statusEncontrado: "PENDENTE", ...bookFields });
+          }
+        }
+      }
+
+      console.log(`[IMPORT-BOOKS] criar=${toCreate.length} mesclar=${toMerge.length}`);
+
+      // ── 5. Criar novos itens em lote (chunks de 500) ─────────────────────────
+      const CHUNK = 500;
+      let created = 0, merged = 0;
+      const createErrors = [];
+
+      for (let i = 0; i < toCreate.length; i += CHUNK) {
+        const chunk = toCreate.slice(i, i + CHUNK);
+        try {
+          const result = await prisma.item.createMany({ data: chunk, skipDuplicates: true });
+          created += result.count;
+        } catch (err) {
+          createErrors.push(`Lote ${Math.floor(i / CHUNK) + 1}: ${err.message}`);
+        }
+      }
+
+      // ── 6. Atualizar (mesclar) itens existentes em paralelo (chunks) ─────────
+      for (let i = 0; i < toMerge.length; i += CHUNK) {
+        const chunk = toMerge.slice(i, i + CHUNK);
+        await Promise.allSettled(
+          chunk.map(({ id, data }) =>
+            prisma.item.update({ where: { id }, data }).then(() => { merged++; }).catch(err => {
+              errors.push({ id, error: err.message });
+            }),
+          ),
+        );
+      }
+
+      console.log(`[IMPORT-BOOKS] concluído: created=${created} merged=${merged} errors=${errors.length}`);
+
+      // Notifica clientes conectados na sala para recarregar os itens
+      if (created + merged > 0) {
+        broadcast({
+          inventoryId,
+          spaceId: space.id,
+          action: "items_imported",
+          payload: {
+            count: created + merged,
+            spaceName: space.name,
+            user: req.user?.fullName || req.user?.sub || "Sistema",
+          },
+        });
+      }
+
+      res.json({
+        success: true,
+        spaceName: space.name,
+        summary: { created, merged, skipped, errors: errors.length + createErrors.length },
+        errors: [...createErrors.map(e => ({ error: e })), ...errors].slice(0, 20),
+      });
+    } catch (err) {
+      console.error("[IMPORT-BOOKS] Error:", err.message || err);
+      res.status(500).json({ error: "Erro ao importar livros", details: err.message });
+    }
+  },
+);
+
+// ─── GET /items/scan — localiza item por código de barras, RFID ou patrimônio ──
+router.get(
+  "/scan",
+  verifyJWT,
+  requireInventoryAccess(),
+  async (req, res) => {
+    try {
+      const { code, spaceId } = req.query;
+      if (!code) return res.status(400).json({ error: "code é obrigatório" });
+      if (!spaceId) return res.status(400).json({ error: "spaceId é obrigatório" });
+
+      const normalized = code.toString().trim();
+      // Leitores podem adicionar zeros à esquerda (ex: "04685874" → salvo como "4685874").
+      // Tentamos a versão exata e a versão sem zeros em todos os três campos identificadores.
+      const stripped = normalized.replace(/^0+/, "") || normalized;
+
+      const orClauses = [
+        { codigoBarras: normalized },
+        { codigoRFID:   normalized },
+        { patrimonio:   normalized },
+      ];
+      if (stripped !== normalized) {
+        orClauses.push({ codigoBarras: stripped });
+        orClauses.push({ codigoRFID:   stripped });
+        orClauses.push({ patrimonio:   stripped });
+      }
+
+      const item = await prisma.item.findFirst({
+        where: {
+          inventoryId: req.inventoryId,
+          OR: orClauses,
+        },
+        include: {
+          space: { select: { id: true, name: true } },
+        },
+      });
+
+      if (!item) {
+        return res.status(404).json({ error: "Item não encontrado para o código informado" });
+      }
+
+      res.json({
+        id: item.id,
+        patrimonio: item.patrimonio,
+        descricao: item.descricao,
+        codigoBarras: item.codigoBarras,
+        codigoRFID: item.codigoRFID,
+        autores: item.autores,
+        anoPublicacao: item.anoPublicacao,
+        numeroExemplar: item.numeroExemplar,
+        statusEncontrado: item.statusEncontrado,
+        spaceId: item.spaceId,
+        spaceName: item.space.name,
+        foundInCurrentSpace: item.spaceId === spaceId,
+      });
+    } catch (err) {
+      console.error("[SCAN] Error:", err.message || err);
+      res.status(500).json({ error: "Erro ao buscar item" });
+    }
+  },
+);
+
+// ─── POST /items/scan-confirm — confirma item via modo de leitura ──────────────
+// Se o item está na sala atual: confirma como encontrado (ENCONTRADO_LEITURA).
+// Se está em outra sala: reloca imediatamente para a sala atual + confirma
+//   (ENCONTRADO_LEITURA_REALOCADO). Não usa pendingConfirm — o scan é confirmação.
+router.post(
+  "/scan-confirm",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const { itemId, spaceId: currentSpaceId, connectionId } = req.body;
+      const user = req.user;
+
+      if (!itemId) return res.status(400).json({ error: "itemId é obrigatório" });
+      if (!currentSpaceId) return res.status(400).json({ error: "spaceId é obrigatório" });
+
+      const item = await prisma.item.findUnique({
+        where: { id: itemId },
+        include: {
+          space: { select: { id: true, name: true } },
+        },
+      });
+
+      if (!item || item.inventoryId !== req.inventoryId) {
+        return res.status(404).json({ error: "Item não encontrado" });
+      }
+
+      const currentSpace = await prisma.space.findFirst({
+        where: { id: currentSpaceId, inventoryId: req.inventoryId },
+        select: { id: true, name: true, isFinalized: true },
+      });
+
+      if (!currentSpace) {
+        return res.status(400).json({ error: "Sala de destino inválida" });
+      }
+      if (currentSpace.isFinalized) {
+        return res.status(409).json({ error: "Esta sala está finalizada" });
+      }
+
+      const isInCurrentSpace = item.spaceId === currentSpaceId;
+      const originalSpaceId   = item.spaceId;
+      const originalSpaceName = item.space.name;
+      const now = new Date();
+
+      await prisma.$transaction(async (tx) => {
+        if (isInCurrentSpace) {
+          // Confirmação simples na sala correta
+          await tx.item.updateMany({
+            where: { id: itemId, inventoryId: req.inventoryId },
+            data: {
+              statusEncontrado: "SIM",
+              dataConferencia: now,
+              ultimoConferente: user.sub,
+            },
+          });
+
+          // Confirmar relocação pendente existente, se houver
+          await tx.relocation.updateMany({
+            where: { itemId, pendingConfirm: true },
+            data: { pendingConfirm: false },
+          });
+
+          await recordItemHistory(tx, {
+            itemId,
+            fromSpaceId: item.lastKnownSpaceId || item.spaceId,
+            toSpaceId: item.spaceId,
+            action: "ENCONTRADO_LEITURA",
+            createdBy: user.sub,
+            metadata: JSON.stringify({ via: "scan" }),
+          });
+        } else {
+          // Reloca para a sala atual + confirma imediatamente (sem pendingConfirm)
+          await tx.item.updateMany({
+            where: { id: itemId, inventoryId: req.inventoryId },
+            data: {
+              spaceId: currentSpaceId,
+              lastKnownSpaceId: item.spaceId,
+              statusEncontrado: "SIM",
+              dataConferencia: now,
+              ultimoConferente: user.sub,
+            },
+          });
+
+          await tx.relocation.upsert({
+            where: { itemId },
+            create: {
+              itemId,
+              fromSpaceId: originalSpaceId,
+              toSpaceId: currentSpaceId,
+              movedBy: user.sub,
+              movedAt: now,
+              pendingConfirm: false,
+            },
+            update: {
+              fromSpaceId: originalSpaceId,
+              toSpaceId: currentSpaceId,
+              movedBy: user.sub,
+              movedAt: now,
+              pendingConfirm: false,
+            },
+          });
+
+          await recordItemHistory(tx, {
+            itemId,
+            fromSpaceId: originalSpaceId,
+            toSpaceId: currentSpaceId,
+            action: "ENCONTRADO_LEITURA_REALOCADO",
+            createdBy: user.sub,
+            metadata: JSON.stringify({ via: "scan", originalSpaceName }),
+          });
+        }
+      });
+
+      await markSpaceStarted(prisma, {
+        inventoryId: req.inventoryId,
+        spaceId: currentSpaceId,
+        user,
+      });
+
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: currentSpaceId,
+        action: "item_checked",
+        excludeClientId,
+        payload: {
+          itemId,
+          spaceId: currentSpaceId,
+          action: isInCurrentSpace ? "ENCONTRADO_LEITURA" : "ENCONTRADO_LEITURA_REALOCADO",
+          user: user.fullName || user.sub,
+          timestamp: now,
+        },
+      });
+
+      if (!isInCurrentSpace) {
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId: originalSpaceId,
+          action: "item_left_space",
+          excludeClientId,
+          payload: {
+            itemId,
+            patrimonio: item.patrimonio,
+            descricao: item.descricao,
+            fromSpaceId: originalSpaceId,
+            toSpaceId: currentSpaceId,
+            user: user.fullName || user.sub,
+            timestamp: now,
+          },
+        });
+      }
+
+      try {
+        await recomputeSpaceCounters(currentSpaceId, req.inventoryId);
+        if (!isInCurrentSpace) {
+          await recomputeSpaceCounters(originalSpaceId, req.inventoryId);
+        }
+      } catch (err) {
+        console.warn("[SCAN-CONFIRM] counter recompute failed:", err.message);
+      }
+
+      res.json({
+        success: true,
+        relocated: !isInCurrentSpace,
+        originalSpaceId: isInCurrentSpace ? null : originalSpaceId,
+        originalSpaceName: isInCurrentSpace ? null : originalSpaceName,
+        savedAt: now,
+      });
+    } catch (err) {
+      console.error("[SCAN-CONFIRM] Error:", err.message || err);
+      res.status(500).json({ error: "Erro ao confirmar item via leitura", details: err.message });
+    }
+  },
+);
+
+// ─── POST /items/scan-undo — desfaz confirmação feita no modo de leitura ───────
+// Recebe originalSpaceId (guardado no estado da sessão do frontend).
+// Se o item foi realocado, reverte o item para a sala original.
+// Registra DESFEITO_LEITURA no histórico.
+router.post(
+  "/scan-undo",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const { itemId, originalSpaceId, connectionId } = req.body;
+      const user = req.user;
+
+      if (!itemId) return res.status(400).json({ error: "itemId é obrigatório" });
+      if (!originalSpaceId) return res.status(400).json({ error: "originalSpaceId é obrigatório" });
+
+      const item = await prisma.item.findUnique({
+        where: { id: itemId },
+        select: {
+          id: true,
+          spaceId: true,
+          inventoryId: true,
+          statusEncontrado: true,
+          patrimonio: true,
+          descricao: true,
+        },
+      });
+
+      if (!item || item.inventoryId !== req.inventoryId) {
+        return res.status(404).json({ error: "Item não encontrado" });
+      }
+
+      const wasRelocated = item.spaceId !== originalSpaceId;
+      const now = new Date();
+
+      await prisma.$transaction(async (tx) => {
+        if (wasRelocated) {
+          // Reverter para a sala original e marcar como não localizado
+          await tx.item.updateMany({
+            where: { id: itemId, inventoryId: req.inventoryId },
+            data: {
+              spaceId: originalSpaceId,
+              lastKnownSpaceId: item.spaceId,
+              statusEncontrado: "NAO",
+              dataConferencia: null,
+              ultimoConferente: null,
+            },
+          });
+
+          // Remover o registro de relocação criado pelo scan
+          await tx.relocation.deleteMany({ where: { itemId } });
+        } else {
+          // Desfaz a confirmação e marca como não localizado na mesma sala
+          await tx.item.updateMany({
+            where: { id: itemId, inventoryId: req.inventoryId },
+            data: {
+              statusEncontrado: "NAO",
+              dataConferencia: null,
+              ultimoConferente: null,
+            },
+          });
+        }
+
+        await recordItemHistory(tx, {
+          itemId,
+          fromSpaceId: item.spaceId,
+          toSpaceId: originalSpaceId,
+          action: "DESFEITO_LEITURA",
+          createdBy: user.sub,
+          metadata: JSON.stringify({ wasRelocated }),
+        });
+      });
+
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: originalSpaceId,
+        action: "item_scan_undone",
+        excludeClientId,
+        payload: {
+          itemId,
+          spaceId: originalSpaceId,
+          user: user.fullName || user.sub,
+          timestamp: now,
+        },
+      });
+
+      if (wasRelocated) {
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId: item.spaceId,
+          action: "item_scan_undone",
+          excludeClientId,
+          payload: {
+            itemId,
+            spaceId: item.spaceId,
+            user: user.fullName || user.sub,
+            timestamp: now,
+          },
+        });
+      }
+
+      try {
+        await recomputeSpaceCounters(originalSpaceId, req.inventoryId);
+        if (wasRelocated) {
+          await recomputeSpaceCounters(item.spaceId, req.inventoryId);
+        }
+      } catch (err) {
+        console.warn("[SCAN-UNDO] counter recompute failed:", err.message);
+      }
+
+      res.json({ success: true, wasRelocated, savedAt: now });
+    } catch (err) {
+      console.error("[SCAN-UNDO] Error:", err.message || err);
+      res.status(500).json({ error: "Erro ao desfazer leitura", details: err.message });
     }
   },
 );

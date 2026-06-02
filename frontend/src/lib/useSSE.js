@@ -43,6 +43,8 @@ export function useSSE({ inventoryId, spaceId, enabled = true }) {
       "group_relocated",
       "group_left_space",
       "item_restored",
+      "item_scan_undone",
+      "items_imported",
       "batch_checked",
       "batch_unfound",
       "batch_relocated",
