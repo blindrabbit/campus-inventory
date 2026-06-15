@@ -368,19 +368,22 @@ router.post(
 
       // ─── Case 2: source room IS finalized ─────────────────────────────────────
       // Try to find a replacement from the same group:
-      //   - statusEncontrado = "NAO" (not yet found)
+      //   - statusEncontrado = "NAO" (not yet found), OR
       //   - currently in a room that is NOT finalized
       const replacement = await prisma.item.findFirst({
         where: {
           inventoryId: req.inventoryId,
           itemGroupId,
           id: { not: item.id },
-          statusEncontrado: "NAO",
-          space: { isFinalized: false },
+          OR: [
+            { statusEncontrado: "NAO" },
+            { space: { isFinalized: false } },
+          ],
         },
         include: {
           space: { select: { id: true, name: true } },
         },
+        orderBy: [{ statusEncontrado: "asc" }, { patrimonio: "asc" }],
       });
 
       if (replacement) {

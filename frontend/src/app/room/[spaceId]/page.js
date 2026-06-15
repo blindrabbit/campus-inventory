@@ -1161,6 +1161,17 @@ export default function RoomPage() {
     setPendingMoveCandidate(candidate);
   };
 
+  const handlePullSearchCandidate = useCallback((candidate) => {
+    if (!candidate?.itemGroup) return;
+    setPullItemModal({
+      groupId: candidate.itemGroup.id,
+      groupName: candidate.itemGroup.name,
+      candidateId: candidate.id,
+      sourceSpaceName: candidate.spaceName,
+    });
+    setPullPatrimonio(candidate.patrimonio || "");
+  }, []);
+
   const handleFlagDuplicate = useCallback(async () => {
     if (!flagDuplicateModal) return;
     const token = localStorage.getItem("token");
@@ -1276,6 +1287,12 @@ export default function RoomPage() {
 
       setPullItemModal(null);
       setPullPatrimonio("");
+      if (pullItemModal?.candidateId) {
+        setSearchResults((prev) =>
+          prev.filter((result) => result.id !== pullItemModal.candidateId),
+        );
+        setSearchTerm("");
+      }
       loadData(token, inventoryId);
 
       if (data.type === "substituted") {
@@ -2182,10 +2199,12 @@ export default function RoomPage() {
 	                      const isDuplicateObservedHere =
 	                        candidate.isDuplicateSuspect &&
 	                        candidate.duplicateObservedSpaceId === spaceId;
-	                      const canFlagAsDuplicate =
-	                        !isViewer &&
-	                        !isInCurrentRoom &&
-	                        candidate.statusEncontrado === "SIM";
+		                      const canFlagAsDuplicate =
+		                        !isViewer &&
+		                        !isInCurrentRoom &&
+		                        candidate.statusEncontrado === "SIM";
+		                      const canPullExactGroupItem =
+		                        !isViewer && !isInCurrentRoom && Boolean(candidate.itemGroup);
 
 	                      return (
 	                        <li
@@ -2228,37 +2247,61 @@ export default function RoomPage() {
 	                              <span className="px-3 py-1.5 bg-purple-100 text-purple-600 rounded-lg text-sm font-medium">
 	                                🔒 Lacrado
 	                              </span>
-	                              {canFlagAsDuplicate && (
-	                                <button
-	                                  type="button"
+		                              {canFlagAsDuplicate && (
+		                                <button
+		                                  type="button"
 	                                  onClick={() => {
 	                                    setFlagDuplicateModal(candidate);
 	                                    setFlagDuplicateNotes("");
 	                                  }}
 	                                  disabled={saving || isDuplicateObservedHere}
 	                                  className="px-3 py-1.5 bg-orange-50 text-orange-700 border border-orange-200 rounded-lg text-sm font-medium hover:bg-orange-100 disabled:opacity-60"
-	                                >
-	                                  {isDuplicateObservedHere ? "Duplicata sinalizada" : "⚠️ Dup."}
-	                                </button>
-	                              )}
-	                            </div>
-	                          ) : (
-	                            <div className="shrink-0 flex flex-col items-end gap-2">
-	                              <button
-	                                onClick={() => handleSearchResultAction(candidate)}
-	                                disabled={saving}
+		                                >
+		                                  {isDuplicateObservedHere ? "Duplicata sinalizada" : "⚠️ Dup."}
+		                                </button>
+		                              )}
+		                              {canPullExactGroupItem && (
+		                                <button
+		                                  type="button"
+		                                  onClick={() => handlePullSearchCandidate(candidate)}
+		                                  disabled={saving}
+		                                  className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+		                                  title="Mover exatamente este patrimônio usando o fluxo de substituição do grupo"
+		                                >
+		                                  Mover este patrimônio
+		                                </button>
+		                              )}
+		                            </div>
+		                          ) : (
+		                            <div className="shrink-0 flex flex-col items-end gap-2">
+		                              <button
+		                                onClick={() => handleSearchResultAction(candidate)}
+		                                disabled={saving}
 	                                className={`px-3 py-1.5 text-white rounded-lg text-sm disabled:opacity-50 ${
 	                                  isInCurrentRoom
 	                                    ? "bg-emerald-600 hover:bg-emerald-700"
 	                                    : "bg-blue-600 hover:bg-blue-700"
 	                                }`}
 	                              >
-	                                {isInCurrentRoom
-	                                  ? "Confirmar na sala"
-	                                  : "Mover para esta sala"}
-	                              </button>
-	                              {canFlagAsDuplicate && (
-	                                <button
+		                                {isInCurrentRoom
+		                                  ? "Confirmar na sala"
+		                                  : candidate.itemGroup
+		                                    ? "Mover grupo"
+		                                    : "Mover para esta sala"}
+		                              </button>
+		                              {canPullExactGroupItem && (
+		                                <button
+		                                  type="button"
+		                                  onClick={() => handlePullSearchCandidate(candidate)}
+		                                  disabled={saving}
+		                                  className="px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 disabled:opacity-50"
+		                                  title="Mover exatamente este patrimônio usando o fluxo de substituição do grupo"
+		                                >
+		                                  Mover este patrimônio
+		                                </button>
+		                              )}
+		                              {canFlagAsDuplicate && (
+		                                <button
 	                                  type="button"
 	                                  onClick={() => {
 	                                    setFlagDuplicateModal(candidate);
