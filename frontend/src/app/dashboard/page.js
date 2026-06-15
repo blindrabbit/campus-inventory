@@ -80,6 +80,10 @@ const DASHBOARD_TABS = [
     label: "Não Localizados",
   },
   {
+    id: "duplicatas",
+    label: "Duplicatas",
+  },
+  {
     id: "criar-grupos",
     label: "Criar Grupos",
   },
@@ -137,6 +141,26 @@ export default function DashboardPage() {
   const [loadingGroups, setLoadingGroups] = useState(false);
   const [expandedCreatedGroups, setExpandedCreatedGroups] = useState({});
   const [groupSubTab, setGroupSubTab] = useState("itens");
+
+  // Editar grupo
+  const [editGroupModal, setEditGroupModal] = useState(null); // group object
+  const [editGroupName, setEditGroupName] = useState("");
+  const [editGroupDesc, setEditGroupDesc] = useState("");
+  const [savingEditGroup, setSavingEditGroup] = useState(false);
+
+  // Excluir grupo
+  const [deleteGroupModal, setDeleteGroupModal] = useState(null); // group object
+  const [deletingGroup, setDeletingGroup] = useState(false);
+
+  // Dividir grupo
+  const [splitGroupModal, setSplitGroupModal] = useState(null); // group object
+  const [splitGroupSelected, setSplitGroupSelected] = useState(new Set());
+  const [splitGroupNewName, setSplitGroupNewName] = useState("");
+  const [splittingGroup, setSplittingGroup] = useState(false);
+
+  // Estados para aba "Duplicatas"
+  const [duplicateItems, setDuplicateItems] = useState([]);
+  const [duplicatesLoading, setDuplicatesLoading] = useState(false);
 
   // Estados para aba "Não Localizados"
   const [unfoundItems, setUnfoundItems] = useState([]);
@@ -575,6 +599,10 @@ export default function DashboardPage() {
         loadUnfoundItems(token);
       }
 
+      if (activeTab === "duplicatas") {
+        loadDuplicates(token);
+      }
+
       if (activeTab === "estrategico") {
         setDashboardRecentEvents([]);
         // fire-and-forget load of the summary when switching to the tab
@@ -817,6 +845,45 @@ export default function DashboardPage() {
     }
   };
 
+  const loadDuplicates = async (token) => {
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    if (!inventoryId) return;
+    setDuplicatesLoading(true);
+    try {
+      const { data } = await axios.get(`${API}/items/duplicates`, {
+        params: { inventoryId },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setDuplicateItems(Array.isArray(data) ? data : []);
+    } catch {
+      showToast({ type: "error", title: "Falha ao carregar duplicatas", message: "Não foi possível carregar os itens sinalizados." });
+    } finally {
+      setDuplicatesLoading(false);
+    }
+  };
+
+  const handleResolveDuplicate = async (item, action) => {
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    try {
+      await axios.patch(
+        `${API}/items/${item.id}/resolve-duplicate`,
+        { action, inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setDuplicateItems((prev) => prev.filter((d) => d.id !== item.id));
+      showToast({
+        type: "success",
+        title: action === "confirm" ? "Duplicata confirmada" : "Sinalização dispensada",
+        message: action === "confirm"
+          ? `Patrimônio ${item.patrimonio} marcado como não localizado.`
+          : `Patrimônio ${item.patrimonio} voltou ao fluxo normal.`,
+      });
+    } catch (err) {
+      showToast({ type: "error", title: "Falha", message: err.response?.data?.error || "Erro ao resolver duplicata." });
+    }
+  };
+
   const loadUnfoundItems = async (token) => {
     try {
       setUnfoundLoading(true);
@@ -1038,6 +1105,74 @@ export default function DashboardPage() {
       });
     } finally {
       setCreatingGroup(false);
+    }
+  };
+
+  const handleEditGroup = async () => {
+    if (!editGroupName.trim()) return;
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    setSavingEditGroup(true);
+    try {
+      await axios.put(
+        `${API}/item-groups/${editGroupModal.id}`,
+        { name: editGroupName.trim(), description: editGroupDesc.trim() || null },
+        { params: { inventoryId }, headers: { Authorization: `Bearer ${token}` } },
+      );
+      setEditGroupModal(null);
+      showToast({ type: "success", title: "Grupo renomeado", message: `"${editGroupName.trim()}" salvo.` });
+      await loadItemGroups(token);
+    } catch (err) {
+      showToast({ type: "error", title: "Falha ao salvar", message: err.response?.data?.error || "Erro ao salvar grupo." });
+    } finally {
+      setSavingEditGroup(false);
+    }
+  };
+
+  const handleDeleteGroup = async () => {
+    if (!deleteGroupModal) return;
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    setDeletingGroup(true);
+    try {
+      await axios.delete(`${API}/item-groups/${deleteGroupModal.id}`, {
+        params: { inventoryId },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setDeleteGroupModal(null);
+      showToast({ type: "success", title: "Grupo excluído", message: `O grupo "${deleteGroupModal.name}" foi removido. Os itens permanecem no sistema.` });
+      await loadItemGroups(token);
+    } catch (err) {
+      showToast({ type: "error", title: "Falha ao excluir", message: err.response?.data?.error || "Erro ao excluir grupo." });
+    } finally {
+      setDeletingGroup(false);
+    }
+  };
+
+  const handleSplitGroup = async () => {
+    if (!splitGroupNewName.trim() || splitGroupSelected.size === 0) return;
+    if (splitGroupSelected.size >= splitGroupModal.items.length) {
+      showToast({ type: "error", title: "Divisão inválida", message: "É necessário manter ao menos 1 item no grupo original." });
+      return;
+    }
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    setSplittingGroup(true);
+    try {
+      await axios.post(
+        `${API}/item-groups/${splitGroupModal.id}/split`,
+        { splitItemIds: [...splitGroupSelected], newGroupName: splitGroupNewName.trim() },
+        { params: { inventoryId }, headers: { Authorization: `Bearer ${token}` } },
+      );
+      setSplitGroupModal(null);
+      setSplitGroupSelected(new Set());
+      setSplitGroupNewName("");
+      showToast({ type: "success", title: "Grupo dividido", message: `Novo grupo "${splitGroupNewName.trim()}" criado com ${splitGroupSelected.size} iten(s).` });
+      await loadItemGroups(token);
+    } catch (err) {
+      showToast({ type: "error", title: "Falha ao dividir", message: err.response?.data?.error || "Erro ao dividir grupo." });
+    } finally {
+      setSplittingGroup(false);
     }
   };
 
@@ -2164,16 +2299,16 @@ export default function DashboardPage() {
                           key={group.id}
                           className="rounded-lg border border-slate-200 bg-slate-50"
                         >
-                          <button
-                            onClick={() =>
-                              setExpandedCreatedGroups((prev) => ({
-                                ...prev,
-                                [group.id]: !prev[group.id],
-                              }))
-                            }
-                            className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-slate-100"
-                          >
-                            <div className="flex-1">
+                          <div className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left">
+                            <div
+                              className="flex-1 cursor-pointer hover:opacity-80"
+                              onClick={() =>
+                                setExpandedCreatedGroups((prev) => ({
+                                  ...prev,
+                                  [group.id]: !prev[group.id],
+                                }))
+                              }
+                            >
                               <p className="font-semibold text-slate-900">
                                 {group.name}
                               </p>
@@ -2197,11 +2332,44 @@ export default function DashboardPage() {
                                       : "bg-rose-400"
                                 }`}
                               />
-                              <span className="text-xs font-semibold text-slate-500">
+                              <button
+                                type="button"
+                                onClick={() => { setEditGroupModal(group); setEditGroupName(group.name); setEditGroupDesc(group.description || ""); }}
+                                className="rounded px-2 py-1 text-xs text-slate-600 border border-slate-300 hover:bg-slate-100"
+                                title="Renomear"
+                              >
+                                ✏️
+                              </button>
+                              <button
+                                type="button"
+                                disabled={group.items.length < 2}
+                                onClick={() => { setSplitGroupModal(group); setSplitGroupSelected(new Set()); setSplitGroupNewName(""); }}
+                                className="rounded px-2 py-1 text-xs text-amber-700 border border-amber-300 bg-amber-50 hover:bg-amber-100 disabled:opacity-40"
+                                title="Dividir grupo"
+                              >
+                                ✂️
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeleteGroupModal(group)}
+                                className="rounded px-2 py-1 text-xs text-red-700 border border-red-300 bg-red-50 hover:bg-red-100"
+                                title="Excluir grupo"
+                              >
+                                🗑
+                              </button>
+                              <span
+                                className="text-xs font-semibold text-slate-500 ml-1 cursor-pointer"
+                                onClick={() =>
+                                  setExpandedCreatedGroups((prev) => ({
+                                    ...prev,
+                                    [group.id]: !prev[group.id],
+                                  }))
+                                }
+                              >
                                 {isOpen ? "▲" : "▼"}
                               </span>
                             </div>
-                          </button>
+                          </div>
 
                           {isOpen && (
                             <div className="border-t border-slate-200 bg-white">
@@ -2256,6 +2424,92 @@ export default function DashboardPage() {
                     })}
                   </div>
                 )}
+              </div>
+            )}
+          </section>
+        ) : activeTab === "duplicatas" ? (
+          <section className="mt-10 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+            <div className="mb-5 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-slate-800">⚠️ Duplicatas suspeitas</h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  Itens sinalizados pelos conferentes como possíveis duplicatas. Revise e decida a ação.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => loadDuplicates(localStorage.getItem("token"))}
+                className="text-xs px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50"
+              >
+                ↻ Atualizar
+              </button>
+            </div>
+
+            {duplicatesLoading ? (
+              <p className="py-10 text-center text-sm text-slate-500 animate-pulse">Carregando…</p>
+            ) : duplicateItems.length === 0 ? (
+              <div className="py-12 text-center text-slate-400">
+                <p className="text-3xl mb-2">✅</p>
+                <p className="text-sm">Nenhuma duplicata suspeita no momento.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {duplicateItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className="rounded-xl border-l-4 border-orange-400 bg-orange-50 p-4 flex flex-col sm:flex-row sm:items-start gap-4"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <span className="font-bold text-slate-800">
+                          #{item.patrimonio || "—"}
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                          item.statusEncontrado === "SIM"
+                            ? "bg-green-100 text-green-700"
+                            : item.statusEncontrado === "NAO"
+                              ? "bg-red-100 text-red-700"
+                              : "bg-amber-100 text-amber-700"
+                        }`}>
+                          {item.statusEncontrado === "SIM" ? "Encontrado" : item.statusEncontrado === "NAO" ? "Não localizado" : "Pendente"}
+                        </span>
+                        {item.space?.isFinalized && (
+                          <span className="text-xs px-2 py-0.5 bg-slate-200 text-slate-700 rounded-full font-medium">
+                            🔒 Sala lacrada
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm text-slate-700 truncate">{item.descricao}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Sala: <span className="font-medium">{item.space?.name || "—"}</span>
+                        {item.itemGroup && (
+                          <> · Grupo: <span className="font-medium">{item.itemGroup.name}</span></>
+                        )}
+                      </p>
+                      {item.duplicateNotes && (
+                        <p className="mt-2 text-xs text-orange-800 bg-orange-100 rounded px-2 py-1 italic">
+                          "{item.duplicateNotes}"
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleResolveDuplicate(item, "dismiss")}
+                        className="px-3 py-1.5 text-xs rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium"
+                      >
+                        ✓ Dispensar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleResolveDuplicate(item, "confirm")}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-red-600 text-white hover:bg-red-700 font-medium"
+                      >
+                        🗑 Confirmar duplicata
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </section>
@@ -3171,6 +3425,152 @@ export default function DashboardPage() {
             className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
           >
             {creatingGroup ? "Criando grupo..." : "Criar Grupo"}
+          </button>
+        </ModalFooter>
+      </Modal>
+
+      {/* Modal: renomear grupo */}
+      <Modal
+        isOpen={!!editGroupModal}
+        onClose={() => setEditGroupModal(null)}
+        title="Renomear grupo"
+        size="sm"
+      >
+        <ModalBody>
+          <div className="space-y-4">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Nome</label>
+              <input
+                value={editGroupName}
+                onChange={(e) => setEditGroupName(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Descrição (opcional)</label>
+              <input
+                value={editGroupDesc}
+                onChange={(e) => setEditGroupDesc(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+          </div>
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => setEditGroupModal(null)}
+            disabled={savingEditGroup}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={handleEditGroup}
+            disabled={savingEditGroup || !editGroupName.trim()}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {savingEditGroup ? "Salvando…" : "Salvar"}
+          </button>
+        </ModalFooter>
+      </Modal>
+
+      {/* Modal: excluir grupo */}
+      <Modal
+        isOpen={!!deleteGroupModal}
+        onClose={() => setDeleteGroupModal(null)}
+        title="Excluir grupo"
+        size="sm"
+      >
+        <ModalBody>
+          <p className="text-sm text-slate-700">
+            Excluir o grupo <strong>{deleteGroupModal?.name}</strong>? Os itens
+            permanecem no sistema, apenas sem vínculo ao grupo.
+          </p>
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => setDeleteGroupModal(null)}
+            disabled={deletingGroup}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={handleDeleteGroup}
+            disabled={deletingGroup}
+            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+          >
+            {deletingGroup ? "Excluindo…" : "Excluir"}
+          </button>
+        </ModalFooter>
+      </Modal>
+
+      {/* Modal: dividir grupo */}
+      <Modal
+        isOpen={!!splitGroupModal}
+        onClose={() => setSplitGroupModal(null)}
+        title="Dividir grupo"
+        size="md"
+      >
+        <ModalBody>
+          <p className="mb-3 text-sm text-slate-600">
+            Selecione os itens que formarão o novo grupo. Os demais permanecem em{" "}
+            <strong>{splitGroupModal?.name}</strong>.
+          </p>
+          <div className="mb-4 max-h-56 overflow-y-auto rounded-lg border border-slate-200 divide-y">
+            {splitGroupModal?.items.map((item) => (
+              <label key={item.id} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-slate-50 text-sm">
+                <input
+                  type="checkbox"
+                  checked={splitGroupSelected.has(item.id)}
+                  onChange={() => {
+                    setSplitGroupSelected((prev) => {
+                      const next = new Set(prev);
+                      next.has(item.id) ? next.delete(item.id) : next.add(item.id);
+                      return next;
+                    });
+                  }}
+                  className="rounded text-indigo-600"
+                />
+                <span className="font-mono text-slate-700">#{item.patrimonio || "—"}</span>
+                <span className="text-slate-500 truncate">{item.descricao}</span>
+              </label>
+            ))}
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-700">Nome do novo grupo</label>
+            <input
+              value={splitGroupNewName}
+              onChange={(e) => setSplitGroupNewName(e.target.value)}
+              placeholder="Nome para o subgrupo"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            />
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            {splitGroupSelected.size} iten(s) selecionado(s) para o novo grupo.
+          </p>
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => setSplitGroupModal(null)}
+            disabled={splittingGroup}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={handleSplitGroup}
+            disabled={splittingGroup || splitGroupSelected.size === 0 || !splitGroupNewName.trim()}
+            className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+          >
+            {splittingGroup ? "Dividindo…" : "Dividir"}
           </button>
         </ModalFooter>
       </Modal>

@@ -123,6 +123,16 @@ export default function RoomPage() {
   const [scanHistory, setScanHistory] = useState([]);
   const [scanCurrentIndex, setScanCurrentIndex] = useState(-1);
 
+  // Puxar item específico do grupo por patrimônio
+  const [pullItemModal, setPullItemModal] = useState(null); // { groupId, groupName }
+  const [pullPatrimonio, setPullPatrimonio] = useState("");
+  const [pullingItem, setPullingItem] = useState(false);
+
+  // Sinalizar duplicata
+  const [flagDuplicateModal, setFlagDuplicateModal] = useState(null); // item object
+  const [flagDuplicateNotes, setFlagDuplicateNotes] = useState("");
+  const [flaggingDuplicate, setFlaggingDuplicate] = useState(false);
+
   // Animação de saída dos cards: { [itemId]: "found" | "unfound" | "moving" }
   const [exitingItems, setExitingItems] = useState({});
 
@@ -229,6 +239,14 @@ export default function RoomPage() {
       space_auto_reverted: {
         title: "⚠️ Sala reaberta pelo revisor",
         msg: `Item #${d.patrimonio} não localizado — sala retornada para conferência.`,
+      },
+      item_flagged_duplicate: {
+        title: "⚠️ Duplicata sinalizada",
+        msg: `${itemLabel} marcado por ${d.user} como possível duplicata.`,
+      },
+      item_duplicate_resolved: {
+        title: "Duplicata atualizada",
+        msg: `${itemLabel} teve a sinalização de duplicata atualizada por ${d.user}.`,
       },
     };
 
@@ -615,6 +633,37 @@ export default function RoomPage() {
     [items],
   );
 
+  const toDuplicateMirrorItem = useCallback(
+    (candidate, duplicateNotes = null) => ({
+      ...candidate,
+      condicaoOriginal: candidate.condicaoOriginal || null,
+      valor: candidate.valor ?? null,
+      codigoSIA: candidate.codigoSIA || null,
+      fornecedor: candidate.fornecedor || null,
+      dataAquisicao: candidate.dataAquisicao || null,
+      documento: candidate.documento || null,
+      codigoBarras: candidate.codigoBarras || null,
+      codigoRFID: candidate.codigoRFID || null,
+      autores: candidate.autores || null,
+      anoPublicacao: candidate.anoPublicacao || null,
+      numeroExemplar: candidate.numeroExemplar || null,
+      isDuplicateSuspect: true,
+      duplicateNotes,
+      duplicateObservedSpaceId: spaceId,
+      duplicateOriginSpaceId: candidate.spaceId,
+      duplicateOriginSpaceName: candidate.spaceName || null,
+      itemGroupId: candidate.itemGroup?.id || candidate.itemGroupId || null,
+      groupName: candidate.itemGroup?.name || candidate.groupName || null,
+      meta: {
+        ...(candidate.meta || {}),
+        isDuplicateMirror: candidate.spaceId !== spaceId,
+        originalSpaceId: candidate.spaceId,
+        originalSpaceName: candidate.spaceName || null,
+      },
+    }),
+    [spaceId],
+  );
+
   const loadData = async (token, inventoryId) => {
     try {
       const [spacesRes, itemsRes, roleRes] = await Promise.all([
@@ -622,10 +671,22 @@ export default function RoomPage() {
           params: { includeFinalized: "true", inventoryId },
           headers: { Authorization: `Bearer ${token}` },
         }),
-        axios.get(`${API}/items?spaceId=${spaceId}`, {
-          params: { inventoryId },
-          headers: { Authorization: `Bearer ${token}` },
-        }),
+        axios
+          .get(`${API}/items?spaceId=${spaceId}`, {
+            params: { inventoryId },
+            headers: { Authorization: `Bearer ${token}` },
+          })
+          .catch((err) => {
+            console.error("[Room Page] Error loading room items:", err);
+            showToast({
+              type: "error",
+              title: "Falha ao carregar itens",
+              message:
+                err.response?.data?.error ||
+                "A sala foi carregada, mas os itens não puderam ser carregados.",
+            });
+            return { data: [] };
+          }),
         axios
           .get(`${API}/auth/inventory-role`, {
             params: { inventoryId },
@@ -1099,6 +1160,153 @@ export default function RoomPage() {
   const handleMoveToCurrentRoom = (candidate) => {
     setPendingMoveCandidate(candidate);
   };
+
+  const handleFlagDuplicate = useCallback(async () => {
+    if (!flagDuplicateModal) return;
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    const trimmedNotes = flagDuplicateNotes.trim() || null;
+    const observedSpaceId =
+      flagDuplicateModal.spaceId && flagDuplicateModal.spaceId !== spaceId
+        ? spaceId
+        : null;
+    setFlaggingDuplicate(true);
+    try {
+      await axios.patch(
+        `${API}/items/${flagDuplicateModal.id}/flag-duplicate`,
+        { notes: trimmedNotes, observedSpaceId, inventoryId, connectionId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setItems((prev) =>
+        prev.some((i) => i.id === flagDuplicateModal.id)
+          ? prev.map((i) =>
+              i.id === flagDuplicateModal.id
+                ? {
+                    ...i,
+                    isDuplicateSuspect: true,
+                    duplicateNotes: trimmedNotes,
+                    duplicateObservedSpaceId: observedSpaceId,
+                  }
+                : i,
+            )
+          : observedSpaceId
+            ? [...prev, toDuplicateMirrorItem(flagDuplicateModal, trimmedNotes)]
+            : prev,
+      );
+      setSearchResults((prev) =>
+        prev.map((result) =>
+          result.id === flagDuplicateModal.id
+            ? {
+                ...result,
+                isDuplicateSuspect: true,
+                duplicateNotes: trimmedNotes,
+                duplicateObservedSpaceId: observedSpaceId,
+              }
+            : result,
+        ),
+      );
+      showToast({ type: "warning", title: "Duplicata sinalizada", message: `Patrimônio ${flagDuplicateModal.patrimonio || flagDuplicateModal.codigoBarras} marcado para revisão.` });
+      setFlagDuplicateModal(null);
+      setFlagDuplicateNotes("");
+    } catch (err) {
+      showToast({ type: "error", title: "Falha", message: err.response?.data?.error || "Erro ao sinalizar duplicata." });
+    } finally {
+      setFlaggingDuplicate(false);
+    }
+  }, [flagDuplicateModal, flagDuplicateNotes, spaceId, connectionId, showToast, toDuplicateMirrorItem]);
+
+  const handleDismissDuplicate = useCallback(async (item) => {
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    try {
+      await axios.patch(
+        `${API}/items/${item.id}/resolve-duplicate`,
+        { action: "dismiss", inventoryId, connectionId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setItems((prev) =>
+        prev
+          .map((i) =>
+            i.id === item.id
+              ? {
+                  ...i,
+                  isDuplicateSuspect: false,
+                  duplicateNotes: null,
+                  duplicateObservedSpaceId: null,
+                }
+              : i,
+          )
+          .filter((i) => !(i.id === item.id && i.meta?.isDuplicateMirror)),
+      );
+      setSearchResults((prev) =>
+        prev.map((result) =>
+          result.id === item.id
+            ? {
+                ...result,
+                isDuplicateSuspect: false,
+                duplicateNotes: null,
+                duplicateObservedSpaceId: null,
+              }
+            : result,
+        ),
+      );
+      showToast({ type: "success", title: "Sinalização removida", message: `Patrimônio ${item.patrimonio} voltou ao fluxo normal.` });
+    } catch (err) {
+      showToast({ type: "error", title: "Falha", message: err.response?.data?.error || "Erro ao remover sinalização." });
+    }
+  }, [connectionId, showToast]);
+
+  const handlePullItem = useCallback(async () => {
+    if (!pullItemModal || !pullPatrimonio.trim()) return;
+    const inventoryId = localStorage.getItem("activeInventoryId");
+    const token = localStorage.getItem("token");
+    setPullingItem(true);
+    try {
+      const { data } = await axios.post(
+        `${API}/item-groups/pull-item`,
+        {
+          itemGroupId: pullItemModal.groupId,
+          patrimonio: pullPatrimonio.trim(),
+          targetSpaceId: spaceId,
+          inventoryId,
+          connectionId,
+        },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+
+      setPullItemModal(null);
+      setPullPatrimonio("");
+      loadData(token, inventoryId);
+
+      if (data.type === "substituted") {
+        showToast({
+          type: "success",
+          title: "Item puxado com substituição",
+          message: data.message || `Patrimônio ${data.item.patrimonio} movido. Substituto ${data.replacement.patrimonio} alocado na sala lacrada.`,
+        });
+      } else if (data.type === "no_replacement") {
+        showToast({
+          type: "warning",
+          title: "Item puxado sem substituto",
+          message: data.warning || `Nenhum substituto disponível. Observação adicionada à sala "${data.sourceSpace.name}".`,
+        });
+      } else {
+        showToast({
+          type: "success",
+          title: "Item puxado",
+          message: `Patrimônio ${data.item.patrimonio} movido de "${data.sourceSpace.name}" para esta sala.`,
+        });
+      }
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha ao puxar item",
+        message: err.response?.data?.error || "Não foi possível puxar o item do grupo.",
+      });
+    } finally {
+      setPullingItem(false);
+    }
+  }, [pullItemModal, pullPatrimonio, spaceId, connectionId, showToast]);
 
   const handleSearchResultAction = useCallback(
     (candidate) => {
@@ -1967,19 +2175,28 @@ export default function RoomPage() {
 
                 {searchResults.length > 0 && (
                   <ul className="border rounded-lg divide-y max-h-64 overflow-auto">
-                    {searchResults.map((candidate) => {
-                      const isInCurrentRoom = candidate.spaceId === spaceId;
-                      const isSealed = !isInCurrentRoom && candidate.spaceIsFinalized && candidate.statusEncontrado !== "NAO";
-                      const isRevisorVerified = candidate.spaceIsVerifiedByRevisor;
+	                    {searchResults.map((candidate) => {
+	                      const isInCurrentRoom = candidate.spaceId === spaceId;
+	                      const isSealed = !isInCurrentRoom && candidate.spaceIsFinalized && candidate.statusEncontrado !== "NAO";
+	                      const isRevisorVerified = candidate.spaceIsVerifiedByRevisor;
+	                      const isDuplicateObservedHere =
+	                        candidate.isDuplicateSuspect &&
+	                        candidate.duplicateObservedSpaceId === spaceId;
+	                      const canFlagAsDuplicate =
+	                        !isViewer &&
+	                        !isInCurrentRoom &&
+	                        candidate.statusEncontrado === "SIM";
 
-                      return (
-                        <li
-                          key={candidate.id}
-                          className={`p-3 flex items-start justify-between gap-3 border-l-4 ${
-                            isInCurrentRoom
-                              ? "bg-sky-50 border-sky-400"
-                              : isSealed
-                              ? "bg-purple-50 border-purple-400"
+	                      return (
+	                        <li
+	                          key={candidate.id}
+	                          className={`p-3 flex items-start justify-between gap-3 border-l-4 ${
+	                            isDuplicateObservedHere
+	                              ? "bg-orange-50 border-orange-500"
+	                              : isInCurrentRoom
+	                              ? "bg-sky-50 border-sky-400"
+	                              : isSealed
+	                              ? "bg-purple-50 border-purple-400"
                               : "bg-amber-50 border-amber-400"
                           }`}
                         >
@@ -1990,37 +2207,72 @@ export default function RoomPage() {
                             <p className="text-sm text-gray-700">
                               {candidate.descricao}
                             </p>
-                            <p className="text-xs text-gray-500">
-                              {isInCurrentRoom
-                                ? `Já está nesta sala${candidate.spaceName ? ` • ${candidate.spaceName}` : ""}`
-                                : `Origem: ${candidate.spaceName || "Sala não informada"}`}
-                            </p>
-                            {isSealed && (
-                              <p className="text-xs text-purple-600 font-medium mt-1">
-                                🔒 {isRevisorVerified ? "Sala revisada e lacrada" : "Sala lacrada"} — para mover este item, a sala precisa ser reaberta pelo administrador.
-                              </p>
-                            )}
-                          </div>
-                          {isSealed ? (
-                            <span className="shrink-0 px-3 py-1.5 bg-purple-100 text-purple-600 rounded-lg text-sm font-medium">
-                              🔒 Lacrado
-                            </span>
-                          ) : (
-                            <button
-                              onClick={() => handleSearchResultAction(candidate)}
-                              disabled={saving}
-                              className={`shrink-0 px-3 py-1.5 text-white rounded-lg text-sm disabled:opacity-50 ${
-                                isInCurrentRoom
-                                  ? "bg-emerald-600 hover:bg-emerald-700"
-                                  : "bg-blue-600 hover:bg-blue-700"
-                              }`}
-                            >
-                              {isInCurrentRoom
-                                ? "Confirmar na sala"
-                                : "Mover para esta sala"}
-                            </button>
-                          )}
-                        </li>
+	                            <p className="text-xs text-gray-500">
+	                              {isInCurrentRoom
+	                                ? `Já está nesta sala${candidate.spaceName ? ` • ${candidate.spaceName}` : ""}`
+	                                : `Origem: ${candidate.spaceName || "Sala não informada"}`}
+	                            </p>
+	                            {isDuplicateObservedHere && (
+	                              <p className="text-xs text-orange-700 font-medium mt-1">
+	                                ⚠️ Possível duplicata já sinalizada nesta sala.
+	                              </p>
+	                            )}
+	                            {isSealed && (
+	                              <p className="text-xs text-purple-600 font-medium mt-1">
+	                                🔒 {isRevisorVerified ? "Sala revisada e lacrada" : "Sala lacrada"} — para mover este item, a sala precisa ser reaberta pelo administrador.
+	                              </p>
+	                            )}
+	                          </div>
+	                          {isSealed ? (
+	                            <div className="shrink-0 flex flex-col items-end gap-2">
+	                              <span className="px-3 py-1.5 bg-purple-100 text-purple-600 rounded-lg text-sm font-medium">
+	                                🔒 Lacrado
+	                              </span>
+	                              {canFlagAsDuplicate && (
+	                                <button
+	                                  type="button"
+	                                  onClick={() => {
+	                                    setFlagDuplicateModal(candidate);
+	                                    setFlagDuplicateNotes("");
+	                                  }}
+	                                  disabled={saving || isDuplicateObservedHere}
+	                                  className="px-3 py-1.5 bg-orange-50 text-orange-700 border border-orange-200 rounded-lg text-sm font-medium hover:bg-orange-100 disabled:opacity-60"
+	                                >
+	                                  {isDuplicateObservedHere ? "Duplicata sinalizada" : "⚠️ Dup."}
+	                                </button>
+	                              )}
+	                            </div>
+	                          ) : (
+	                            <div className="shrink-0 flex flex-col items-end gap-2">
+	                              <button
+	                                onClick={() => handleSearchResultAction(candidate)}
+	                                disabled={saving}
+	                                className={`px-3 py-1.5 text-white rounded-lg text-sm disabled:opacity-50 ${
+	                                  isInCurrentRoom
+	                                    ? "bg-emerald-600 hover:bg-emerald-700"
+	                                    : "bg-blue-600 hover:bg-blue-700"
+	                                }`}
+	                              >
+	                                {isInCurrentRoom
+	                                  ? "Confirmar na sala"
+	                                  : "Mover para esta sala"}
+	                              </button>
+	                              {canFlagAsDuplicate && (
+	                                <button
+	                                  type="button"
+	                                  onClick={() => {
+	                                    setFlagDuplicateModal(candidate);
+	                                    setFlagDuplicateNotes("");
+	                                  }}
+	                                  disabled={saving || isDuplicateObservedHere}
+	                                  className="px-3 py-1.5 bg-orange-50 text-orange-700 border border-orange-200 rounded-lg text-sm font-medium hover:bg-orange-100 disabled:opacity-60"
+	                                >
+	                                  {isDuplicateObservedHere ? "Duplicata sinalizada" : "⚠️ Dup."}
+	                                </button>
+	                              )}
+	                            </div>
+	                          )}
+	                        </li>
                       );
                     })}
                   </ul>
@@ -2342,7 +2594,9 @@ export default function RoomPage() {
                   {/* Main group card */}
                   <div
                     className={`relative bg-white rounded-xl shadow border-l-4 transition-all ${
-                      allFound
+                      row.items.some((i) => i.isDuplicateSuspect)
+                        ? "border-orange-500"
+                        : allFound
                         ? "border-green-500"
                         : relocatedCount > 0
                           ? "border-indigo-500"
@@ -2376,6 +2630,11 @@ export default function RoomPage() {
                               <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium">
                                 ⚠️ {relocatedCount} movido
                                 {relocatedCount !== 1 ? "s" : ""}
+                              </span>
+                            )}
+                            {row.items.some((i) => i.isDuplicateSuspect) && (
+                              <span className="px-2 py-0.5 bg-orange-100 text-orange-800 text-xs rounded-full font-medium">
+                                ⚠️ Duplicata suspeita
                               </span>
                             )}
                           </div>
@@ -2446,6 +2705,18 @@ export default function RoomPage() {
                               className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700 font-medium"
                             >
                               ✅ Encontrar tudo
+                            </button>
+                          )}
+                          {!isViewer && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPullItemModal({ groupId: row.groupId, groupName: row.groupName });
+                                setPullPatrimonio("");
+                              }}
+                              className="px-3 py-1.5 bg-indigo-50 text-indigo-700 rounded-lg text-xs hover:bg-indigo-100 font-medium border border-indigo-200"
+                            >
+                              🔍 Puxar por patrimônio
                             </button>
                           )}
                           {!isViewer && relocatedCount > 0 && (
@@ -2537,11 +2808,13 @@ export default function RoomPage() {
                                   : item.verificationStatus === "REVERIFICAR" ||
                                       verificationItems?.includes(item.id)
                                     ? "border-purple-500 bg-purple-50"
-                                    : item.meta?.isRelocated
-                                      ? "border-yellow-500 bg-yellow-50"
-                                      : item.statusEncontrado === "SIM"
-                                        ? "border-green-500 bg-green-50"
-                                        : "border-gray-300 bg-gray-50"
+                                    : item.isDuplicateSuspect
+                                      ? "border-orange-500 bg-orange-50"
+                                      : item.meta?.isRelocated
+                                        ? "border-yellow-500 bg-yellow-50"
+                                        : item.statusEncontrado === "SIM"
+                                          ? "border-green-500 bg-green-50"
+                                          : "border-gray-300 bg-gray-50"
                               }`}
                             >
                               {selectionMode && (
@@ -2593,6 +2866,11 @@ export default function RoomPage() {
                                             {item.meta.fromSpaceName}
                                           </span>
                                         ))}
+                                      {item.isDuplicateSuspect && (
+                                        <span className="px-2 py-0.5 bg-orange-200 text-orange-800 text-xs rounded font-medium">
+                                          ⚠️ Duplicata suspeita
+                                        </span>
+                                      )}
                                       {item.statusEncontrado === "SIM" &&
                                         !item.verificationStatus && (
                                           <span className="text-green-600 text-sm">
@@ -2655,7 +2933,21 @@ export default function RoomPage() {
                                           )
                                           : null
                                         : item.statusEncontrado === "SIM"
-                                          ? null
+                                          ? (!isViewer ? (
+                                            item.isDuplicateSuspect ? (
+                                              <button
+                                                onClick={(e) => { e.stopPropagation(); handleDismissDuplicate(item); }}
+                                                className="px-2 py-2 bg-orange-100 text-orange-700 rounded md:rounded-lg text-xs font-medium hover:bg-orange-200 transition shrink-0"
+                                                title="Remover sinalização de duplicata"
+                                              >✕ Dup.</button>
+                                            ) : (
+                                              <button
+                                                onClick={(e) => { e.stopPropagation(); setFlagDuplicateModal(item); setFlagDuplicateNotes(""); }}
+                                                className="px-2 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded md:rounded-lg text-xs font-medium hover:bg-orange-100 transition shrink-0"
+                                                title="Sinalizar como duplicata suspeita"
+                                              >⚠️ Dup.</button>
+                                            )
+                                          ) : null)
                                           : item.verificationStatus ===
                                               "NAO_LOCALIZADO_VERIFICACAO"
                                             ? (
@@ -2714,6 +3006,30 @@ export default function RoomPage() {
                                                     🚫 N.Loc
                                                   </span>
                                                 </button>
+                                                {item.isDuplicateSuspect ? (
+                                                  <button
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      handleDismissDuplicate(item);
+                                                    }}
+                                                    className="px-2 py-2 bg-orange-100 text-orange-700 rounded md:rounded-lg text-xs font-medium hover:bg-orange-200 transition shrink-0"
+                                                    title="Remover sinalização de duplicata"
+                                                  >
+                                                    ✕ Dup.
+                                                  </button>
+                                                ) : (
+                                                  <button
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      setFlagDuplicateModal(item);
+                                                      setFlagDuplicateNotes("");
+                                                    }}
+                                                    className="px-2 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded md:rounded-lg text-xs font-medium hover:bg-orange-100 transition shrink-0"
+                                                    title="Sinalizar como duplicata suspeita"
+                                                  >
+                                                    ⚠️ Dup.
+                                                  </button>
+                                                )}
                                               </>
                                             ) : null)}
                                   </div>
@@ -2871,11 +3187,13 @@ export default function RoomPage() {
                     : item.verificationStatus === "REVERIFICAR" ||
                         verificationItems?.includes(item.id)
                       ? "border-purple-500 bg-purple-50"
-                      : item.meta?.isRelocated
-                        ? "border-yellow-500 bg-yellow-50"
-                        : item.statusEncontrado === "SIM"
-                          ? "border-green-500 bg-green-50"
-                          : "border-gray-300 bg-white"
+                      : item.isDuplicateSuspect
+                        ? "border-orange-500 bg-orange-50"
+                        : item.meta?.isRelocated
+                          ? "border-yellow-500 bg-yellow-50"
+                          : item.statusEncontrado === "SIM"
+                            ? "border-green-500 bg-green-50"
+                            : "border-gray-300 bg-white"
                 }`}
               >
                 {selectionMode && (
@@ -2933,6 +3251,14 @@ export default function RoomPage() {
                             ⚠️ Movido de {item.meta.fromSpaceName}
                           </span>
                         ))}
+                      {item.isDuplicateSuspect && (
+                        <span className="px-2 py-0.5 bg-orange-200 text-orange-800 text-xs rounded font-medium">
+                          ⚠️ Duplicata suspeita
+                          {item.meta?.isDuplicateMirror && item.meta?.originalSpaceName
+                            ? ` em ${item.meta.originalSpaceName}`
+                            : ""}
+                        </span>
+                      )}
                       {item.statusEncontrado === "SIM" &&
                         !item.verificationStatus && (
                           <span className="text-green-600 text-sm">✓</span>
@@ -2992,7 +3318,21 @@ export default function RoomPage() {
                             )
                             : null
                           : item.statusEncontrado === "SIM"
-                            ? null
+                            ? (!isViewer ? (
+                              item.isDuplicateSuspect ? (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleDismissDuplicate(item); }}
+                                  className="px-2 py-2 bg-orange-100 text-orange-700 rounded md:rounded-lg text-xs font-medium hover:bg-orange-200 transition shrink-0"
+                                  title="Remover sinalização de duplicata"
+                                >✕ Dup.</button>
+                              ) : (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setFlagDuplicateModal(item); setFlagDuplicateNotes(""); }}
+                                  className="px-2 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded md:rounded-lg text-xs font-medium hover:bg-orange-100 transition shrink-0"
+                                  title="Sinalizar como duplicata suspeita"
+                                >⚠️ Dup.</button>
+                              )
+                            ) : null)
                             : item.verificationStatus ===
                                 "NAO_LOCALIZADO_VERIFICACAO"
                               ? (
@@ -3044,6 +3384,30 @@ export default function RoomPage() {
                                     </span>
                                     <span className="md:hidden">🚫 N.Loc</span>
                                   </button>
+                                  {item.isDuplicateSuspect ? (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDismissDuplicate(item);
+                                      }}
+                                      className="px-2 py-2 bg-orange-100 text-orange-700 rounded md:rounded-lg text-xs font-medium hover:bg-orange-200 transition shrink-0"
+                                      title="Remover sinalização de duplicata"
+                                    >
+                                      ✕ Dup.
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setFlagDuplicateModal(item);
+                                        setFlagDuplicateNotes("");
+                                      }}
+                                      className="px-2 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded md:rounded-lg text-xs font-medium hover:bg-orange-100 transition shrink-0"
+                                      title="Sinalizar como duplicata suspeita"
+                                    >
+                                      ⚠️ Dup.
+                                    </button>
+                                  )}
                                 </>
                               ) : null)}
                     </div>
@@ -3431,6 +3795,86 @@ export default function RoomPage() {
                 className="px-4 py-2 rounded-xl bg-slate-700 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 🔓 Confirmar Reabertura
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Modal: sinalizar duplicata ───────────────────────────────────── */}
+      {flagDuplicateModal && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-bold text-gray-800 mb-1">⚠️ Sinalizar duplicata suspeita</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              Patrimônio <strong>#{flagDuplicateModal.patrimonio || flagDuplicateModal.codigoBarras || "—"}</strong> será marcado para revisão de duplicata. Descreva opcionalmente onde viu o outro exemplar.
+            </p>
+            <textarea
+              value={flagDuplicateNotes}
+              onChange={(e) => setFlagDuplicateNotes(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm resize-none h-24 focus:outline-none focus:border-orange-400 mb-4"
+              placeholder="Ex: vi este mesmo patrimônio já marcado como encontrado na sala 205..."
+            />
+            <div className="flex gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => { setFlagDuplicateModal(null); setFlagDuplicateNotes(""); }}
+                className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleFlagDuplicate}
+                disabled={flaggingDuplicate}
+                className="px-4 py-2 text-sm bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+              >
+                {flaggingDuplicate ? "Sinalizando…" : "Sinalizar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Modal: puxar item específico do grupo por patrimônio ─────────── */}
+      {pullItemModal && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-bold text-gray-800 mb-1">🔍 Puxar item por patrimônio</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              Grupo: <strong>{pullItemModal.groupName}</strong>. Digite o patrimônio do item
+              que deseja trazer para esta sala.
+            </p>
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+              Se o item estiver em uma <strong>sala lacrada</strong>, o sistema tentará
+              substituí-lo automaticamente por outro do mesmo grupo. Caso não haja
+              substituto, o item será removido da sala lacrada e uma observação será
+              registrada.
+            </p>
+            <input
+              type="text"
+              value={pullPatrimonio}
+              onChange={(e) => setPullPatrimonio(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handlePullItem()}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-500 mb-4"
+              placeholder="Número do patrimônio"
+              autoFocus
+            />
+            <div className="flex gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => { setPullItemModal(null); setPullPatrimonio(""); }}
+                className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handlePullItem}
+                disabled={pullingItem || !pullPatrimonio.trim()}
+                className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {pullingItem ? "Puxando…" : "Puxar item"}
               </button>
             </div>
           </div>

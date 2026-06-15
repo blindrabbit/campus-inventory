@@ -534,21 +534,157 @@ Interação: Clique para fechar manualmente, hover pausa o timer
 Acessibilidade: role="alert" para leitores de tela
 
 **Estados Visuais de Itens**
-Status
-Estilo CSS
-Badge
-ENCONTRADO
-border-l-4 border-green-500
-✓ Conferido (verde)
-REALOCADO (pendente)
-border-l-4 border-yellow-500 bg-yellow-50
-⚠️ Movido de [X] (amarelo)
-NAO_LOCALIZADO
-border-l-4 border-red-300 opacity-75
-❌ Não encontrado (vermelho)
-EXPANDIDO
-shadow-lg ring-2 ring-blue-200
-—
+
+| Status / Condição | Borda | Fundo | Badge |
+|---|---|---|---|
+| `NAO_LOCALIZADO_VERIFICACAO` | red-500 | red-50 | ⚠️ Não localizado na verificação |
+| `REVERIFICAR` (revisão) | purple-500 | purple-50 | — |
+| `isDuplicateSuspect = true` | orange-500 | orange-50 | ⚠️ Duplicata suspeita |
+| Realocado pendente | yellow-500 | yellow-50 | ⚠️ Movido de [X] |
+| `ENCONTRADO` | green-500 | green-50 | ✓ |
+| padrão / pendente | gray-300 | gray-50 | — |
+
+Itens de acervo (sem patrimônio) exibem badge `📚 Acervo` (indigo) no título do card.
+
+---
+
+## 📱 Modo de Leitura (Scanning Mode)
+
+Disponível na tela de conferência (`/room/[spaceId]`) para perfis com permissão de escrita.
+
+### Funcionamento
+
+- Botão **"Modo Leitura"** abre modal com histórico de sessão e input oculto que captura leituras de leitores USB HID (que emulam teclado + Enter)
+- Ao pressionar Enter, o código acumulado é enviado para busca; o item é confirmado automaticamente (`statusEncontrado = SIM`)
+- Se o item pertencer a outra sala, é realocado imediatamente para a sala atual (sem aguardar confirmação)
+- Normalização de zeros à esquerda: `04685874` encontra item armazenado como `4685874` em qualquer dos campos `codigoBarras`, `codigoRFID` ou `patrimonio`
+
+### Desfazer leitura
+
+- Cada leitura pode ser desfeita individualmente via botão na linha do histórico
+- Desfazer define `statusEncontrado = "NAO"` (nunca PENDENTE)
+- Item removido da sala de leitura e relocalização revertida se aplicável
+
+### Histórico de sessão
+
+- Lista as leituras da sessão atual com navegação ← →
+- Exibe patrimônio, sala de origem (se realocado) e timestamp
+- Persiste na memória da página durante a sessão aberta
+
+### Trilha de auditoria
+
+Ações registradas no `ItemHistorico`:
+- `ENCONTRADO_LEITURA` — item encontrado na sala correta
+- `ENCONTRADO_LEITURA_REALOCADO` — item encontrado e movido de outra sala
+- `DESFEITO_LEITURA` — leitura desfeita
+
+---
+
+## 📚 Importação de Acervo (Livros)
+
+Disponível em `/admin/dados` (perfil ADMIN/ADMIN_CICLO).
+
+### Identificadores alternativos
+
+Itens de acervo podem não possuir número de patrimônio. Os campos extras suportados são:
+
+| Campo | Descrição |
+|---|---|
+| `codigoBarras` | Código de barras (identificador principal — único por inventário) |
+| `codigoRFID` | Tag RFID |
+| `numeroExemplar` | Número do exemplar |
+| `codigoExemplar` | Código do exemplar |
+| `autores` | Autores |
+| `anoPublicacao` | Ano de publicação |
+
+### Formato XLSX esperado (exportação da biblioteca)
+
+| Coluna | Campo |
+|---|---|
+| B | Código de barras |
+| C | Código do exemplar |
+| P | Nº do exemplar |
+| AF | Nº do patrimônio (opcional) |
+| AH | Título (descrição) |
+| BA | Autores |
+| BG | Ano de publicação |
+| última coluna | Código RFID |
+
+### Comportamento de importação
+
+- Upsert por `codigoBarras` (preferencial) ou `patrimonio`
+- Itens com `codigoBarras` novo + `patrimonio` existente → mesclam campos bibliográficos no item já cadastrado
+- Itens totalmente novos (sem patrimônio, sem barras correspondente) → criados como acervo (`patrimonio = null`)
+- Após importação bem-sucedida, SSE `items_imported` atualiza automaticamente as salas abertas
+
+---
+
+## 🗂 Grupos de Itens
+
+Grupos permitem conferir em lote conjuntos de itens idênticos (ex: 30 cadeiras iguais).
+
+### Criação e CRUD
+
+Acessado pelo dashboard → aba **"Criar Grupos"**:
+
+- **Sub-aba "Itens"**: selecione itens por descrição/patrimônio → botão "Criar Grupo" abre modal para nome e descrição
+- **Sub-aba "Grupos Criados"**: lista todos os grupos com contadores de itens encontrados. Por grupo:
+  - ✏️ **Renomear** — altera nome e descrição
+  - ✂️ **Dividir** — seleciona itens para formar um novo subgrupo (mínimo 1 item permanece no original)
+  - 🗑 **Excluir** — remove o grupo; itens permanecem no sistema sem vínculo ao grupo
+
+### Conferência em lote (sala)
+
+Na sala, itens de um mesmo grupo aparecem agrupados em card empilhado com:
+- Contador de encontrados / total
+- **"✅ Encontrar tudo"** — marca todos os itens não encontrados como SIM
+- **"↩️ Desfazer movimentação / tudo"** — estorna confirmações
+- **"🔍 Puxar por patrimônio"** — abre modal para buscar um item específico do grupo pelo número de patrimônio
+
+### Puxar item específico (pull-item)
+
+Quando o conferente localiza um item específico de um grupo em outra sala, pode puxá-lo pelo patrimônio. O sistema lida com três cenários:
+
+| Cenário | Comportamento |
+|---|---|
+| Sala de origem **não lacrada** | Move o item para a sala atual; log `PUXADO_DO_GRUPO` |
+| Sala de origem **lacrada** + substituto disponível | Move o item; move outro do grupo (status NAO, sala aberta) para a sala lacrada como substituto; log `PUXADO_DO_GRUPO_SALA_LACRADA` + `SUBSTITUIÇÃO_EM_SALA_LACRADA` |
+| Sala de origem **lacrada** + sem substituto | Move o item; acrescenta aviso às **observações da sala lacrada**; log `PUXADO_DO_GRUPO_SEM_SUBSTITUTO` |
+
+Critério de substituto: item do mesmo grupo com `statusEncontrado = "NAO"` em sala não finalizada.
+
+---
+
+## ⚠️ Duplicatas Suspeitas
+
+### Sinalização (conferente)
+
+Cada card de item possui botão **"⚠️ Dup."** na linha de ações. Ao clicar:
+- Modal para descrever a observação (ex: "vi este patrimônio já marcado em outra sala")
+- Item recebe borda laranja + badge **"⚠️ Duplicata suspeita"**
+- Botão vira **"✕ Dup."** para dispensa inline sem precisar do dashboard
+
+### Revisão (admin/revisor)
+
+Dashboard → aba **"Duplicatas"**:
+- Lista todos os itens sinalizados no inventário com patrimônio, status, sala, grupo e nota do conferente
+- Duas ações de resolução:
+
+| Ação | Efeito | Log |
+|---|---|---|
+| **✓ Dispensar** | Limpa a flag; item volta ao fluxo normal | `DUPLICATA_DISPENSADA` |
+| **🗑 Confirmar duplicata** | Limpa a flag + define `statusEncontrado = "NAO"` | `DUPLICATA_CONFIRMADA` |
+
+### Trilha de auditoria
+
+Todas as ações geram registro em `ItemHistorico`:
+- `DUPLICATA_SUSPEITA` — ao sinalizar
+- `DUPLICATA_CONFIRMADA` — ao confirmar (item descartado)
+- `DUPLICATA_DISPENSADA` — ao dispensar (falso positivo)
+
+SSE emite `item_flagged_duplicate` e `item_duplicate_resolved` para atualização em tempo real em abas abertas.
+
+---
 
 ## 🚫 Fora de Escopo (v1)
 

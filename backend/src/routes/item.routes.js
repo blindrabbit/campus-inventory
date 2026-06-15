@@ -57,6 +57,228 @@ function normalizeString(str) {
     .trim();
 }
 
+function isMissingDuplicateSchemaError(err) {
+  const message = `${err?.message || ""} ${err?.meta?.column || ""}`;
+  return (
+    err?.code === "P2022" ||
+    message.includes("is_duplicate_suspect") ||
+    message.includes("duplicate_notes") ||
+    message.includes("duplicate_observed_space_id") ||
+    message.includes("isDuplicateSuspect") ||
+    message.includes("duplicateObservedSpaceId")
+  );
+}
+
+function roomItemSelect({ includeDuplicateObserved = true } = {}) {
+  return {
+    id: true,
+    patrimonio: true,
+    descricao: true,
+    condicaoOriginal: true,
+    valor: true,
+    codigoSIA: true,
+    fornecedor: true,
+    dataAquisicao: true,
+    documento: true,
+    codigoBarras: true,
+    codigoRFID: true,
+    autores: true,
+    anoPublicacao: true,
+    numeroExemplar: true,
+    spaceId: true,
+    statusEncontrado: true,
+    condicaoVisual: true,
+    dataConferencia: true,
+    ultimoConferente: true,
+    verificationStatus: true,
+    verifiedAt: true,
+    verifiedBy: true,
+    isDuplicateSuspect: true,
+    duplicateNotes: true,
+    ...(includeDuplicateObserved ? { duplicateObservedSpaceId: true } : {}),
+    space: { select: { id: true, name: true } },
+    relocationIn: {
+      select: {
+        fromSpace: { select: { name: true } },
+        movedBy: true,
+        pendingConfirm: true,
+        wasUnfound: true,
+      },
+    },
+    itemGroup: { select: { id: true, name: true } },
+  };
+}
+
+function legacyRoomItemSelect() {
+  const { isDuplicateSuspect, duplicateNotes, duplicateObservedSpaceId, ...select } =
+    roomItemSelect({ includeDuplicateObserved: false });
+  return select;
+}
+
+function formatRoomItems(items, spaceId) {
+  return items.map((item) => {
+    const duplicateObservedSpaceId = item.duplicateObservedSpaceId || null;
+    const duplicateMirrorMeta =
+      item.spaceId !== spaceId && duplicateObservedSpaceId === spaceId
+        ? {
+            isDuplicateMirror: true,
+            originalSpaceId: item.spaceId,
+            originalSpaceName: item.space?.name || null,
+          }
+        : null;
+    const relocationMeta = item.relocationIn
+      ? {
+          isRelocated: item.relocationIn.pendingConfirm,
+          fromSpaceName: item.relocationIn.fromSpace.name,
+          movedBy: item.relocationIn.movedBy,
+          pendingConfirm: item.relocationIn.pendingConfirm,
+          wasUnfound: item.relocationIn.wasUnfound,
+        }
+      : null;
+
+    return {
+      id: item.id,
+      patrimonio: item.patrimonio,
+      descricao: item.descricao,
+      condicaoOriginal: item.condicaoOriginal,
+      valor: item.valor,
+      codigoSIA: item.codigoSIA,
+      fornecedor: item.fornecedor,
+      dataAquisicao: item.dataAquisicao,
+      documento: item.documento,
+      codigoBarras: item.codigoBarras,
+      codigoRFID: item.codigoRFID,
+      autores: item.autores,
+      anoPublicacao: item.anoPublicacao,
+      numeroExemplar: item.numeroExemplar,
+      statusEncontrado: item.statusEncontrado,
+      condicaoVisual: item.condicaoVisual,
+      dataConferencia: item.dataConferencia,
+      ultimoConferente: item.ultimoConferente,
+      verificationStatus: item.verificationStatus,
+      verifiedAt: item.verifiedAt,
+      verifiedBy: item.verifiedBy,
+      isDuplicateSuspect: Boolean(item.isDuplicateSuspect),
+      duplicateNotes: item.duplicateNotes || null,
+      duplicateObservedSpaceId,
+      duplicateOriginSpaceId: item.spaceId,
+      duplicateOriginSpaceName: item.space?.name || null,
+      itemGroupId: item.itemGroup?.id || null,
+      groupName: item.itemGroup?.name || null,
+      meta:
+        relocationMeta || duplicateMirrorMeta
+          ? { ...(relocationMeta || {}), ...(duplicateMirrorMeta || {}) }
+          : null,
+    };
+  });
+}
+
+function searchItemSelect({ includeDuplicateFields = true } = {}) {
+  return {
+    id: true,
+    patrimonio: true,
+    descricao: true,
+    spaceId: true,
+    statusEncontrado: true,
+    ...(includeDuplicateFields
+      ? {
+          isDuplicateSuspect: true,
+          duplicateNotes: true,
+          duplicateObservedSpaceId: true,
+        }
+      : {}),
+    space: {
+      select: {
+        id: true,
+        name: true,
+        isFinalized: true,
+        isVerifiedByRevisor: true,
+      },
+    },
+    itemGroupId: true,
+    itemGroup: {
+      select: {
+        id: true,
+        name: true,
+        _count: { select: { items: true } },
+      },
+    },
+  };
+}
+
+function scoreAndMapSearchResults(items, query) {
+  const normalizedQuery = normalizeString(query);
+  const queryAsNumber = normalizePatrimonioNumber(query);
+
+  return items
+    .map((item) => {
+      const normalizedPatrimonio = normalizeString(item.patrimonio || "");
+      const normalizedDescricao = normalizeString(item.descricao || "");
+      const itemPatrimonioNumber = normalizePatrimonioNumber(item.patrimonio);
+
+      let priority = 999;
+      if (
+        queryAsNumber !== null &&
+        itemPatrimonioNumber !== null &&
+        itemPatrimonioNumber === queryAsNumber
+      ) {
+        priority = 0;
+      } else if (normalizedPatrimonio === normalizedQuery) {
+        priority = 1;
+      } else if (normalizedPatrimonio.startsWith(normalizedQuery)) {
+        priority = 2;
+      } else if (normalizedPatrimonio.includes(normalizedQuery)) {
+        priority = 3;
+      } else if (normalizedDescricao.startsWith(normalizedQuery)) {
+        priority = 4;
+      } else if (normalizedDescricao.includes(normalizedQuery)) {
+        priority = 5;
+      }
+
+      return { item, priority };
+    })
+    .filter((scored) => scored.priority !== 999)
+    .sort((a, b) => {
+      if (a.priority !== b.priority) {
+        return a.priority - b.priority;
+      }
+      const aNum = normalizePatrimonioNumber(a.item.patrimonio);
+      const bNum = normalizePatrimonioNumber(b.item.patrimonio);
+      if (aNum !== null && bNum !== null) {
+        return aNum - bNum;
+      }
+      return (a.item.patrimonio || "").localeCompare(
+        b.item.patrimonio || "",
+        "pt-BR",
+        {
+          numeric: true,
+        },
+      );
+    })
+    .slice(0, 20)
+    .map(({ item }) => ({
+      id: item.id,
+      patrimonio: item.patrimonio,
+      descricao: item.descricao,
+      spaceId: item.spaceId,
+      spaceName: item.space?.name || "Sem localização",
+      statusEncontrado: item.statusEncontrado,
+      isDuplicateSuspect: Boolean(item.isDuplicateSuspect),
+      duplicateNotes: item.duplicateNotes || null,
+      duplicateObservedSpaceId: item.duplicateObservedSpaceId || null,
+      spaceIsFinalized: item.space?.isFinalized || false,
+      spaceIsVerifiedByRevisor: item.space?.isVerifiedByRevisor || false,
+      itemGroupId: item.itemGroupId || null,
+      itemGroup: item.itemGroup
+        ? {
+            id: item.itemGroup.id,
+            name: item.itemGroup.name,
+            totalItems: item.itemGroup._count.items,
+          }
+        : null,
+    }));
+}
+
 async function markSpaceStarted(prismaClient, { inventoryId, spaceId, user }) {
   if (!inventoryId || !spaceId || !user?.sub) return;
 
@@ -105,59 +327,38 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
     const items = await prisma.item.findMany({
       where: {
         inventoryId: req.inventoryId,
-        spaceId,
         statusEncontrado: { not: "NAO" },
+        OR: [
+          { spaceId },
+          { isDuplicateSuspect: true, duplicateObservedSpaceId: spaceId },
+        ],
       },
-      include: {
-        relocationIn: {
-          select: {
-            fromSpace: { select: { name: true } },
-            movedBy: true,
-            pendingConfirm: true,
-            wasUnfound: true,
-          },
-        },
-        itemGroup: { select: { id: true, name: true } },
-      },
+      select: roomItemSelect(),
     });
 
-    const formatted = items.map((item) => ({
-      id: item.id,
-      patrimonio: item.patrimonio,
-      descricao: item.descricao,
-      condicaoOriginal: item.condicaoOriginal,
-      valor: item.valor,
-      codigoSIA: item.codigoSIA,
-      fornecedor: item.fornecedor,
-      dataAquisicao: item.dataAquisicao,
-      documento: item.documento,
-      codigoBarras: item.codigoBarras,
-      codigoRFID: item.codigoRFID,
-      autores: item.autores,
-      anoPublicacao: item.anoPublicacao,
-      numeroExemplar: item.numeroExemplar,
-      statusEncontrado: item.statusEncontrado,
-      condicaoVisual: item.condicaoVisual,
-      dataConferencia: item.dataConferencia,
-      ultimoConferente: item.ultimoConferente,
-      verificationStatus: item.verificationStatus,
-      verifiedAt: item.verifiedAt,
-      verifiedBy: item.verifiedBy,
-      itemGroupId: item.itemGroup?.id || null,
-      groupName: item.itemGroup?.name || null,
-      meta: item.relocationIn
-        ? {
-            isRelocated: item.relocationIn.pendingConfirm,
-            fromSpaceName: item.relocationIn.fromSpace.name,
-            movedBy: item.relocationIn.movedBy,
-            pendingConfirm: item.relocationIn.pendingConfirm,
-            wasUnfound: item.relocationIn.wasUnfound,
-          }
-        : null,
-    }));
+    const formatted = formatRoomItems(items, spaceId);
 
     res.json(formatted);
   } catch (err) {
+    if (isMissingDuplicateSchemaError(err)) {
+      try {
+        console.warn(
+          "[items] Duplicate columns are not available yet; loading room items without duplicate mirror support.",
+        );
+        const { spaceId } = req.query;
+        const items = await prisma.item.findMany({
+          where: {
+            inventoryId: req.inventoryId,
+            spaceId,
+            statusEncontrado: { not: "NAO" },
+          },
+          select: legacyRoomItemSelect(),
+        });
+        return res.json(formatRoomItems(items, spaceId));
+      } catch (fallbackErr) {
+        console.error("Error fetching items with legacy fallback:", fallbackErr);
+      }
+    }
     console.error("Error fetching items:", err);
     res.status(500).json({ error: "Erro ao carregar itens" });
   }
@@ -165,33 +366,40 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
 
 router.get("/all", verifyJWT, requireInventoryAccess(), async (req, res) => {
   try {
-    const items = await prisma.item.findMany({
-      where: { inventoryId: req.inventoryId },
-      select: {
-        id: true,
-        patrimonio: true,
-        descricao: true,
-        spaceId: true,
-        statusEncontrado: true,
-        condicaoVisual: true,
-        space: {
-          select: {
-            id: true,
-            name: true,
-            isFinalized: true,
-            isVerifiedByRevisor: true,
-          },
-        },
-      },
-      orderBy: { patrimonio: "asc" },
-    });
+      const items = await prisma.item.findMany({
+        where: { inventoryId: req.inventoryId },
+        select: searchItemSelect(),
+        orderBy: { patrimonio: "asc" },
+      });
 
-    res.json(items);
-  } catch (err) {
-    console.error("Error fetching all items:", err);
-    res.status(500).json({ error: "Erro ao carregar itens" });
-  }
-});
+      res.json(items);
+    } catch (err) {
+      if (isMissingDuplicateSchemaError(err)) {
+        try {
+          console.warn(
+            "[items/all] Duplicate columns are not available yet; loading without duplicate metadata.",
+          );
+          const items = await prisma.item.findMany({
+            where: { inventoryId: req.inventoryId },
+            select: searchItemSelect({ includeDuplicateFields: false }),
+            orderBy: { patrimonio: "asc" },
+          });
+          return res.json(
+            items.map((item) => ({
+              ...item,
+              isDuplicateSuspect: false,
+              duplicateNotes: null,
+              duplicateObservedSpaceId: null,
+            })),
+          );
+        } catch (fallbackErr) {
+          console.error("Error fetching all items with legacy fallback:", fallbackErr);
+        }
+      }
+      console.error("Error fetching all items:", err);
+      res.status(500).json({ error: "Erro ao carregar itens" });
+    }
+  });
 
 router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
   try {
@@ -204,124 +412,38 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
         .json({ error: "Informe ao menos 2 caracteres para busca" });
     }
 
-    const normalizedQuery = normalizeString(q);
-    const queryAsNumber = normalizePatrimonioNumber(q);
-
     const where = {
       inventoryId: req.inventoryId,
       ...(excludeSpaceId ? { NOT: { spaceId: excludeSpaceId } } : {}),
     };
 
-    // Get all items (or a large batch) to search client-side
     const matches = await prisma.item.findMany({
       where,
-      select: {
-        id: true,
-        patrimonio: true,
-        descricao: true,
-        spaceId: true,
-        statusEncontrado: true,
-        space: {
-          select: {
-            id: true,
-            name: true,
-            isFinalized: true,
-            isVerifiedByRevisor: true,
-          },
-        },
-        itemGroupId: true,
-        itemGroup: {
-          select: {
-            id: true,
-            name: true,
-            _count: { select: { items: true } },
-          },
-        },
-      },
+      select: searchItemSelect(),
     });
 
-    // Filter and score results with priority: patrimonio > descricao
-    const scored = matches
-      .map((item) => {
-        const normalizedPatrimonio = normalizeString(item.patrimonio || "");
-        const normalizedDescricao = normalizeString(item.descricao || "");
-        const itemPatrimonioNumber = normalizePatrimonioNumber(item.patrimonio);
-
-        // Priority scoring:
-        // 0. Patrimonio exact match (numeric): highest priority
-        // 1. Patrimonio exact match (text): high priority
-        // 2. Patrimonio starts with: medium-high priority
-        // 3. Patrimonio contains: medium priority
-        // 4. Description starts with: medium-low priority
-        // 5. Description contains: low priority
-        // 999. No match
-
-        let priority = 999;
-
-        // Numeric exact match is highest priority
-        if (
-          queryAsNumber !== null &&
-          itemPatrimonioNumber !== null &&
-          itemPatrimonioNumber === queryAsNumber
-        ) {
-          priority = 0;
-        } else if (normalizedPatrimonio === normalizedQuery) {
-          priority = 1;
-        } else if (normalizedPatrimonio.startsWith(normalizedQuery)) {
-          priority = 2;
-        } else if (normalizedPatrimonio.includes(normalizedQuery)) {
-          priority = 3;
-        } else if (normalizedDescricao.startsWith(normalizedQuery)) {
-          priority = 4;
-        } else if (normalizedDescricao.includes(normalizedQuery)) {
-          priority = 5;
-        }
-
-        return { item, priority };
-      })
-      .filter((scored) => scored.priority !== 999)
-      .sort((a, b) => {
-        if (a.priority !== b.priority) {
-          return a.priority - b.priority;
-        }
-        // Same priority: sort by patrimonio numerically
-        const aNum = normalizePatrimonioNumber(a.item.patrimonio);
-        const bNum = normalizePatrimonioNumber(b.item.patrimonio);
-        if (aNum !== null && bNum !== null) {
-          return aNum - bNum;
-        }
-        return (a.item.patrimonio || "").localeCompare(
-          b.item.patrimonio || "",
-          "pt-BR",
-          {
-            numeric: true,
-          },
-        );
-      })
-      .slice(0, 20)
-      .map(({ item }) => item);
-
-    res.json(
-      scored.map((item) => ({
-        id: item.id,
-        patrimonio: item.patrimonio,
-        descricao: item.descricao,
-        spaceId: item.spaceId,
-        spaceName: item.space?.name || "Sem localização",
-        statusEncontrado: item.statusEncontrado,
-        spaceIsFinalized: item.space?.isFinalized || false,
-        spaceIsVerifiedByRevisor: item.space?.isVerifiedByRevisor || false,
-        itemGroupId: item.itemGroupId || null,
-        itemGroup: item.itemGroup
-          ? {
-              id: item.itemGroup.id,
-              name: item.itemGroup.name,
-              totalItems: item.itemGroup._count.items,
-            }
-          : null,
-      })),
-    );
+    res.json(scoreAndMapSearchResults(matches, q));
   } catch (err) {
+    if (isMissingDuplicateSchemaError(err)) {
+      try {
+        const q = req.query.q?.toString().trim();
+        const excludeSpaceId = req.query.excludeSpaceId?.toString();
+        const where = {
+          inventoryId: req.inventoryId,
+          ...(excludeSpaceId ? { NOT: { spaceId: excludeSpaceId } } : {}),
+        };
+        console.warn(
+          "[items/search] Duplicate columns are not available yet; searching without duplicate metadata.",
+        );
+        const matches = await prisma.item.findMany({
+          where,
+          select: searchItemSelect({ includeDuplicateFields: false }),
+        });
+        return res.json(scoreAndMapSearchResults(matches, q));
+      } catch (fallbackErr) {
+        console.error("Error searching items with legacy fallback:", fallbackErr);
+      }
+    }
     console.error("Error searching items:", err);
     res.status(500).json({ error: "Erro ao buscar patrimônios" });
   }
@@ -2575,6 +2697,266 @@ router.post(
     } catch (err) {
       console.error("[SCAN-UNDO] Error:", err.message || err);
       res.status(500).json({ error: "Erro ao desfazer leitura", details: err.message });
+    }
+  },
+);
+
+// ─── Duplicatas ───────────────────────────────────────────────────────────────
+
+// GET /items/duplicates — lista todos os itens suspeitos de duplicata no inventário
+router.get(
+  "/duplicates",
+  verifyJWT,
+  requireInventoryAccess(),
+  async (req, res) => {
+    try {
+      const items = await prisma.item.findMany({
+        where: { inventoryId: req.inventoryId, isDuplicateSuspect: true },
+        include: {
+          space: { select: { id: true, name: true, isFinalized: true } },
+          itemGroup: { select: { id: true, name: true } },
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+
+      res.json(
+        items.map((item) => ({
+          id: item.id,
+          patrimonio: item.patrimonio,
+          descricao: item.descricao,
+          statusEncontrado: item.statusEncontrado,
+          condicaoVisual: item.condicaoVisual,
+          duplicateNotes: item.duplicateNotes,
+          space: item.space,
+          itemGroup: item.itemGroup
+            ? { id: item.itemGroup.id, name: item.itemGroup.name }
+            : null,
+          updatedAt: item.updatedAt,
+        })),
+      );
+    } catch (err) {
+      console.error("Error fetching duplicate suspects:", err);
+      res.status(500).json({ error: "Erro ao carregar duplicatas suspeitas" });
+    }
+  },
+);
+
+// PATCH /items/:itemId/flag-duplicate — sinaliza item como suspeito de duplicata
+router.patch(
+  "/:itemId/flag-duplicate",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  async (req, res) => {
+    try {
+      const { itemId } = req.params;
+      const { notes, observedSpaceId, connectionId } = req.body;
+      const user = req.user;
+
+      const item = await prisma.item.findFirst({
+        where: { id: itemId, inventoryId: req.inventoryId },
+        select: {
+          id: true,
+          patrimonio: true,
+          descricao: true,
+          spaceId: true,
+          inventoryId: true,
+          isDuplicateSuspect: true,
+          duplicateObservedSpaceId: true,
+        },
+      });
+      if (!item) return res.status(404).json({ error: "Item não encontrado" });
+
+      let validObservedSpaceId = null;
+      if (observedSpaceId && observedSpaceId !== item.spaceId) {
+        const observedSpace = await prisma.space.findFirst({
+          where: { id: observedSpaceId, inventoryId: req.inventoryId },
+          select: { id: true },
+        });
+        if (!observedSpace) {
+          return res.status(404).json({ error: "Sala de observação não encontrada" });
+        }
+        validObservedSpaceId = observedSpace.id;
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.item.update({
+          where: { id: itemId },
+          data: {
+            isDuplicateSuspect: true,
+            duplicateNotes: notes?.trim() || null,
+            duplicateObservedSpaceId: validObservedSpaceId,
+          },
+        });
+
+        await recordItemHistory(tx, {
+          itemId,
+          fromSpaceId: item.spaceId,
+          toSpaceId: item.spaceId,
+          action: "DUPLICATA_SUSPEITA",
+          reason: notes?.trim() || "Sinalizado como possível duplicata",
+          createdBy: user.sub,
+        });
+      });
+
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: item.spaceId,
+        action: "item_flagged_duplicate",
+        excludeClientId,
+        payload: {
+          itemId,
+          patrimonio: item.patrimonio,
+          descricao: item.descricao,
+          notes: notes?.trim() || null,
+          user: user.fullName || user.sub,
+          timestamp: new Date(),
+        },
+      });
+      if (validObservedSpaceId) {
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId: validObservedSpaceId,
+          action: "item_flagged_duplicate",
+          excludeClientId,
+          payload: {
+            itemId,
+            patrimonio: item.patrimonio,
+            descricao: item.descricao,
+            notes: notes?.trim() || null,
+            user: user.fullName || user.sub,
+            timestamp: new Date(),
+          },
+        });
+      }
+
+      res.json({
+        success: true,
+        item: {
+          id: item.id,
+          isDuplicateSuspect: true,
+          duplicateNotes: notes?.trim() || null,
+          duplicateObservedSpaceId: validObservedSpaceId,
+        },
+      });
+    } catch (err) {
+      console.error("Error flagging duplicate:", err);
+      res.status(500).json({ error: "Erro ao sinalizar duplicata" });
+    }
+  },
+);
+
+// PATCH /items/:itemId/resolve-duplicate — resolve a suspeita de duplicata
+// action: "confirm" → marca como NAO + limpa flag | "dismiss" → apenas limpa flag
+router.patch(
+  "/:itemId/resolve-duplicate",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  async (req, res) => {
+    try {
+      const { itemId } = req.params;
+      const { action, connectionId } = req.body; // action: "confirm" | "dismiss"
+      const user = req.user;
+
+      if (!["confirm", "dismiss"].includes(action)) {
+        return res
+          .status(400)
+          .json({ error: "action deve ser 'confirm' ou 'dismiss'" });
+      }
+
+      const item = await prisma.item.findFirst({
+        where: { id: itemId, inventoryId: req.inventoryId },
+        select: {
+          id: true,
+          patrimonio: true,
+          descricao: true,
+          spaceId: true,
+          inventoryId: true,
+          isDuplicateSuspect: true,
+          duplicateNotes: true,
+          duplicateObservedSpaceId: true,
+          space: { select: { isFinalized: true } },
+        },
+      });
+      if (!item) return res.status(404).json({ error: "Item não encontrado" });
+      if (!item.isDuplicateSuspect) {
+        return res
+          .status(400)
+          .json({ error: "Este item não está sinalizado como duplicata suspeita" });
+      }
+
+      const historyAction =
+        action === "confirm" ? "DUPLICATA_CONFIRMADA" : "DUPLICATA_DISPENSADA";
+      const historyReason =
+        action === "confirm"
+          ? "Duplicata confirmada — item marcado como não localizado"
+          : "Suspeita de duplicata dispensada — item retorna ao fluxo normal";
+
+      await prisma.$transaction(async (tx) => {
+        await tx.item.update({
+          where: { id: itemId },
+          data: {
+            isDuplicateSuspect: false,
+            duplicateNotes: null,
+            duplicateObservedSpaceId: null,
+            ...(action === "confirm" && { statusEncontrado: "NAO" }),
+          },
+        });
+
+        await recordItemHistory(tx, {
+          itemId,
+          fromSpaceId: item.spaceId,
+          toSpaceId: item.spaceId,
+          action: historyAction,
+          reason: historyReason,
+          createdBy: user.sub,
+        });
+      });
+
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      broadcast({
+        inventoryId: req.inventoryId,
+        spaceId: item.spaceId,
+        action: "item_duplicate_resolved",
+        excludeClientId,
+        payload: {
+          itemId,
+          patrimonio: item.patrimonio,
+          descricao: item.descricao,
+          resolution: action,
+          user: user.fullName || user.sub,
+          timestamp: new Date(),
+        },
+      });
+      if (item.duplicateObservedSpaceId) {
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId: item.duplicateObservedSpaceId,
+          action: "item_duplicate_resolved",
+          excludeClientId,
+          payload: {
+            itemId,
+            patrimonio: item.patrimonio,
+            descricao: item.descricao,
+            resolution: action,
+            user: user.fullName || user.sub,
+            timestamp: new Date(),
+          },
+        });
+      }
+
+      res.json({ success: true, action });
+    } catch (err) {
+      console.error("Error resolving duplicate:", err);
+      res.status(500).json({ error: "Erro ao resolver duplicata" });
     }
   },
 );

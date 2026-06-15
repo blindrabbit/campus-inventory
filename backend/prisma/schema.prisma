@@ -99,6 +99,7 @@ model Space {
   
   items         Item[]
   lastKnownItems Item[]    @relation("ItemLastKnownSpace")
+  duplicateObservedItems Item[] @relation("ItemDuplicateObservedSpace")
   relocationOut Relocation[] @relation("RelocationSource")
   relocationIn  Relocation[] @relation("RelocationTarget")
   historyFrom   ItemHistorico[] @relation("HistoricoFromSpace")
@@ -152,6 +153,12 @@ model Item {
   verificationStatus String?   // "REVERIFICAR" during review, cleared after check
   verifiedAt        DateTime?
   verifiedBy        String?
+
+  // Duplicatas
+  isDuplicateSuspect Boolean   @default(false) @map("is_duplicate_suspect")
+  duplicateNotes    String?    @map("duplicate_notes")
+  duplicateObservedSpaceId String? @map("duplicate_observed_space_id")
+  duplicateObservedSpace Space? @relation("ItemDuplicateObservedSpace", fields: [duplicateObservedSpaceId], references: [id], onDelete: SetNull)
 
   // Grupos
   itemGroupId       String?
