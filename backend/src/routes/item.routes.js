@@ -32,11 +32,85 @@ const BOOK_COL = {
 };
 
 function bookCellText(row, colIndex) {
+  if (!colIndex) return null;
   const cell = row.getCell(colIndex);
   const v = cell.value;
   if (v === null || v === undefined) return null;
-  if (typeof v === "object") return String(v.text ?? v.result ?? "").trim() || null;
+  if (typeof v === "object") {
+    return (
+      String(
+        v.text ??
+          v.result ??
+          (Array.isArray(v.richText)
+            ? v.richText.map((part) => part.text).join("")
+            : ""),
+      ).trim() || null
+    );
+  }
   return String(v).trim() || null;
+}
+
+function normalizeHeader(value) {
+  return normalizeString(value).replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function detectBookColumns(worksheet) {
+  const headers = new Map();
+  worksheet.getRow(1).eachCell({ includeEmpty: false }, (cell, colIndex) => {
+    const normalized = normalizeHeader(cell.value?.toString() || "");
+    if (normalized) headers.set(normalized, colIndex);
+  });
+
+  const findHeader = (...aliases) => {
+    for (const alias of aliases) {
+      const match = headers.get(normalizeHeader(alias));
+      if (match) return match;
+    }
+    return null;
+  };
+
+  let maxCol = 0;
+  worksheet.getRow(1).eachCell({ includeEmpty: false }, (_, colIndex) => {
+    if (colIndex > maxCol) maxCol = colIndex;
+  });
+
+  return {
+    codigoBarras:
+      findHeader(
+        "exemplar",
+        "codigo de barras",
+        "código de barras",
+        "codigo barras",
+      ) || BOOK_COL.CODIGO_BARRAS,
+    patrimonio:
+      findHeader(
+        "numero do patrimonio",
+        "número do patrimônio",
+        "patrimonio",
+        "patrimônio",
+      ) || BOOK_COL.PATRIMONIO,
+    titulo: findHeader("titulo", "título", "titulo n") || BOOK_COL.TITULO,
+    codigoExemplar:
+      findHeader(
+        "codigo do acervo",
+        "código do acervo",
+        "codigo exemplar",
+        "código exemplar",
+        "codigo do exemplar",
+      ) || BOOK_COL.CODIGO_EXEMPLAR,
+    numeroExemplar:
+      findHeader("numero do exemplar", "número do exemplar") ||
+      BOOK_COL.NUMERO_EXEMPLAR,
+    autores: findHeader("autor", "autores") || BOOK_COL.AUTORES,
+    anoPublicacao:
+      findHeader("ano", "ano publicacao", "ano publicação") ||
+      BOOK_COL.ANO_PUBLICACAO,
+    catalogo:
+      findHeader("classificacao", "classificação", "codigo do acervo") || null,
+    codigoRFID:
+      findHeader("rfid", "codigo rfid", "código rfid") ||
+      (maxCol > BOOK_COL.ANO_PUBLICACAO ? maxCol : null),
+  };
 }
 
 function normalizePatrimonioNumber(value) {
@@ -178,6 +252,9 @@ function searchItemSelect({ includeDuplicateFields = true } = {}) {
     id: true,
     patrimonio: true,
     descricao: true,
+    codigoBarras: true,
+    codigoRFID: true,
+    autores: true,
     spaceId: true,
     statusEncontrado: true,
     ...(includeDuplicateFields
@@ -213,26 +290,46 @@ function scoreAndMapSearchResults(items, query) {
   return items
     .map((item) => {
       const normalizedPatrimonio = normalizeString(item.patrimonio || "");
+      const normalizedCodigoBarras = normalizeString(item.codigoBarras || "");
+      const normalizedCodigoRFID = normalizeString(item.codigoRFID || "");
       const normalizedDescricao = normalizeString(item.descricao || "");
+      const normalizedAutores = normalizeString(item.autores || "");
       const itemPatrimonioNumber = normalizePatrimonioNumber(item.patrimonio);
+      const itemCodigoBarrasNumber = normalizePatrimonioNumber(item.codigoBarras);
 
       let priority = 999;
       if (
         queryAsNumber !== null &&
+        itemCodigoBarrasNumber !== null &&
+        itemCodigoBarrasNumber === queryAsNumber
+      ) {
+        priority = 0;
+      } else if (
+        queryAsNumber !== null &&
         itemPatrimonioNumber !== null &&
         itemPatrimonioNumber === queryAsNumber
       ) {
-        priority = 0;
-      } else if (normalizedPatrimonio === normalizedQuery) {
         priority = 1;
-      } else if (normalizedPatrimonio.startsWith(normalizedQuery)) {
+      } else if (normalizedCodigoBarras === normalizedQuery) {
         priority = 2;
-      } else if (normalizedPatrimonio.includes(normalizedQuery)) {
+      } else if (normalizedCodigoRFID === normalizedQuery) {
         priority = 3;
-      } else if (normalizedDescricao.startsWith(normalizedQuery)) {
+      } else if (normalizedPatrimonio === normalizedQuery) {
+        priority = 3;
+      } else if (normalizedCodigoBarras.startsWith(normalizedQuery)) {
         priority = 4;
-      } else if (normalizedDescricao.includes(normalizedQuery)) {
+      } else if (normalizedPatrimonio.startsWith(normalizedQuery)) {
         priority = 5;
+      } else if (normalizedCodigoBarras.includes(normalizedQuery)) {
+        priority = 6;
+      } else if (normalizedPatrimonio.includes(normalizedQuery)) {
+        priority = 7;
+      } else if (normalizedDescricao.startsWith(normalizedQuery)) {
+        priority = 8;
+      } else if (normalizedDescricao.includes(normalizedQuery)) {
+        priority = 9;
+      } else if (normalizedAutores.includes(normalizedQuery)) {
+        priority = 10;
       }
 
       return { item, priority };
@@ -259,6 +356,8 @@ function scoreAndMapSearchResults(items, query) {
     .map(({ item }) => ({
       id: item.id,
       patrimonio: item.patrimonio,
+      codigoBarras: item.codigoBarras,
+      codigoRFID: item.codigoRFID,
       descricao: item.descricao,
       spaceId: item.spaceId,
       spaceName: item.space?.name || "Sem localização",
@@ -808,6 +907,269 @@ router.post(
     } catch (err) {
       console.error("Error relocating item:", err);
       res.status(500).json({ error: "Erro ao realocar item" });
+    }
+  },
+);
+
+router.post(
+  "/planned-relocations",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const { movements, reason, connectionId } = req.body;
+      const user = req.user;
+
+      if (user?.role !== "ADMIN" && req.inventoryRole !== "ADMIN_CICLO") {
+        return res.status(403).json({
+          error:
+            "Apenas administradores do ciclo podem realizar movimentações planejadas",
+        });
+      }
+
+      if (!Array.isArray(movements) || movements.length === 0) {
+        return res.status(400).json({
+          error: "Informe ao menos uma movimentação para executar",
+        });
+      }
+
+      if (movements.length > 500) {
+        return res.status(400).json({
+          error: "Limite de 500 movimentações por operação",
+        });
+      }
+
+      const normalizedMovements = movements.map((movement) => ({
+        itemId: movement?.itemId?.toString(),
+        targetSpaceId: movement?.targetSpaceId?.toString(),
+      }));
+
+      if (
+        normalizedMovements.some(
+          (movement) => !movement.itemId || !movement.targetSpaceId,
+        )
+      ) {
+        return res.status(400).json({
+          error: "Cada movimentação precisa ter patrimônio e sala de destino",
+        });
+      }
+
+      const itemIds = normalizedMovements.map((movement) => movement.itemId);
+      const targetSpaceIds = [
+        ...new Set(normalizedMovements.map((movement) => movement.targetSpaceId)),
+      ];
+      const repeatedItemIds = itemIds.filter(
+        (itemId, index) => itemIds.indexOf(itemId) !== index,
+      );
+
+      if (repeatedItemIds.length > 0) {
+        return res.status(400).json({
+          error:
+            "Um mesmo patrimônio não pode aparecer mais de uma vez na lista",
+        });
+      }
+
+      const [items, targetSpaces] = await Promise.all([
+        prisma.item.findMany({
+          where: { id: { in: itemIds }, inventoryId: req.inventoryId },
+          select: {
+            id: true,
+            patrimonio: true,
+            descricao: true,
+            spaceId: true,
+            statusEncontrado: true,
+            inventoryId: true,
+            space: {
+              select: {
+                id: true,
+                name: true,
+                isFinalized: true,
+              },
+            },
+          },
+        }),
+        prisma.space.findMany({
+          where: {
+            id: { in: targetSpaceIds },
+            inventoryId: req.inventoryId,
+            isActive: true,
+          },
+          select: {
+            id: true,
+            name: true,
+            isFinalized: true,
+          },
+        }),
+      ]);
+
+      const itemsById = new Map(items.map((item) => [item.id, item]));
+      const spacesById = new Map(targetSpaces.map((space) => [space.id, space]));
+      const missingItem = normalizedMovements.find(
+        (movement) => !itemsById.has(movement.itemId),
+      );
+      const missingSpace = normalizedMovements.find(
+        (movement) => !spacesById.has(movement.targetSpaceId),
+      );
+
+      if (missingItem) {
+        return res.status(404).json({ error: "Patrimônio não encontrado" });
+      }
+      if (missingSpace) {
+        return res.status(400).json({ error: "Sala de destino inválida" });
+      }
+
+      const sameSpaceMovement = normalizedMovements.find((movement) => {
+        const item = itemsById.get(movement.itemId);
+        return item?.spaceId === movement.targetSpaceId;
+      });
+
+      if (sameSpaceMovement) {
+        const item = itemsById.get(sameSpaceMovement.itemId);
+        return res.status(400).json({
+          error: `O patrimônio ${item?.patrimonio || item?.descricao || item?.id} já está na sala de destino`,
+        });
+      }
+
+      const hasFinalizedSpace = normalizedMovements.some((movement) => {
+        const item = itemsById.get(movement.itemId);
+        const targetSpace = spacesById.get(movement.targetSpaceId);
+        return item?.space?.isFinalized || targetSpace?.isFinalized;
+      });
+
+      if (hasFinalizedSpace && !reason?.toString().trim()) {
+        return res.status(400).json({
+          error:
+            "Informe uma justificativa para movimentar itens envolvendo sala lacrada",
+        });
+      }
+
+      const movedAt = new Date();
+      const sourceSpaceIds = [...new Set(items.map((item) => item.spaceId))];
+      const affectedSpaceIds = [
+        ...new Set([...sourceSpaceIds, ...targetSpaceIds]),
+      ];
+      const movementByItemId = new Map(
+        normalizedMovements.map((movement) => [movement.itemId, movement]),
+      );
+      const relocationData = items.map((item) => {
+        const movement = movementByItemId.get(item.id);
+        return {
+          itemId: item.id,
+          fromSpaceId: item.spaceId,
+          toSpaceId: movement.targetSpaceId,
+          movedBy: user.sub,
+          movedAt,
+          pendingConfirm: true,
+          wasUnfound: item.statusEncontrado === "NAO",
+        };
+      });
+
+      await prisma.$transaction(async (tx) => {
+        for (const item of items) {
+          const movement = movementByItemId.get(item.id);
+          await tx.item.updateMany({
+            where: { id: item.id, inventoryId: req.inventoryId },
+            data: {
+              spaceId: movement.targetSpaceId,
+              lastKnownSpaceId: item.spaceId,
+              statusEncontrado: "PENDENTE",
+            },
+          });
+        }
+
+        await tx.relocation.deleteMany({ where: { itemId: { in: itemIds } } });
+        await tx.relocation.createMany({ data: relocationData });
+        await tx.itemHistorico.createMany({
+          data: items.map((item) => {
+            const movement = movementByItemId.get(item.id);
+            const targetSpace = spacesById.get(movement.targetSpaceId);
+            return {
+              itemId: item.id,
+              fromSpaceId: item.spaceId,
+              toSpaceId: movement.targetSpaceId,
+              action: "REALOCADO",
+              reason:
+                reason?.toString().trim() ||
+                "Movimentação planejada entre salas",
+              createdBy: user.sub,
+              createdAt: movedAt,
+              metadata: JSON.stringify({
+                source: "planned-relocation",
+                reason: reason?.toString().trim() || null,
+                sourceSpaceFinalized: Boolean(item.space?.isFinalized),
+                targetSpaceFinalized: Boolean(targetSpace?.isFinalized),
+              }),
+            };
+          }),
+        });
+      });
+
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      for (const movement of normalizedMovements) {
+        const item = itemsById.get(movement.itemId);
+        const targetSpace = spacesById.get(movement.targetSpaceId);
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId: movement.targetSpaceId,
+          action: "item_relocated",
+          excludeClientId,
+          payload: {
+            itemId: item.id,
+            patrimonio: item.patrimonio,
+            descricao: item.descricao,
+            fromSpaceId: item.spaceId,
+            fromSpaceName: item.space?.name,
+            toSpaceId: movement.targetSpaceId,
+            toSpaceName: targetSpace?.name,
+            user: user.fullName || user.sub,
+            timestamp: movedAt,
+          },
+        });
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId: item.spaceId,
+          action: "item_left_space",
+          excludeClientId,
+          payload: {
+            itemId: item.id,
+            patrimonio: item.patrimonio,
+            descricao: item.descricao,
+            fromSpaceId: item.spaceId,
+            fromSpaceName: item.space?.name,
+            toSpaceId: movement.targetSpaceId,
+            toSpaceName: targetSpace?.name,
+            user: user.fullName || user.sub,
+            timestamp: movedAt,
+          },
+        });
+      }
+
+      for (const spaceId of affectedSpaceIds) {
+        await recomputeSpaceCounters(spaceId, req.inventoryId).catch((err) => {
+          console.warn(
+            "Failed to recompute counters after planned relocation:",
+            err.message || err,
+          );
+        });
+      }
+
+      res.json({
+        success: true,
+        updatedCount: items.length,
+        affectedSpaceCount: affectedSpaceIds.length,
+        finalizedSpaceTouched: hasFinalizedSpace,
+        message: "Movimentações planejadas executadas com sucesso",
+      });
+    } catch (err) {
+      console.error("Error executing planned relocations:", err);
+      res
+        .status(500)
+        .json({ error: "Erro ao executar movimentações planejadas" });
     }
   },
 );
@@ -2193,34 +2555,35 @@ router.post(
       const worksheet = workbook.worksheets[0];
       if (!worksheet) return res.status(400).json({ error: "Nenhuma aba encontrada no arquivo XLSX" });
 
-      // Detectar coluna RFID (última coluna do cabeçalho após BG=59)
-      let maxCol = 0;
-      worksheet.getRow(1).eachCell({ includeEmpty: false }, (_, c) => { if (c > maxCol) maxCol = c; });
-      const COL_RFID = maxCol > BOOK_COL.ANO_PUBLICACAO ? maxCol : null;
+      const bookColumns = detectBookColumns(worksheet);
 
       // ── 2. Extrair linhas com dados (sem tocar no banco ainda) ───────────────
       const rows = [];
       worksheet.eachRow((row, rowIdx) => {
         if (rowIdx === 1) return; // pular cabeçalho
-        const codigoBarras   = bookCellText(row, BOOK_COL.CODIGO_BARRAS);
-        const patrimonio     = bookCellText(row, BOOK_COL.PATRIMONIO);
-        const titulo         = bookCellText(row, BOOK_COL.TITULO);
+        const codigoBarras   = bookCellText(row, bookColumns.codigoBarras);
+        const patrimonio     = bookCellText(row, bookColumns.patrimonio);
+        const titulo         = bookCellText(row, bookColumns.titulo);
         if (!codigoBarras && !patrimonio) return; // linha sem identificador
         rows.push({
           rowIdx,
           codigoBarras,
           patrimonio,
           titulo,
-          codigoExemplar: bookCellText(row, BOOK_COL.CODIGO_EXEMPLAR),
-          numeroExemplar: bookCellText(row, BOOK_COL.NUMERO_EXEMPLAR),
-          autores:        bookCellText(row, BOOK_COL.AUTORES),
-          anoPublicacao:  bookCellText(row, BOOK_COL.ANO_PUBLICACAO),
-          codigoRFID:     COL_RFID ? bookCellText(row, COL_RFID) : null,
+          codigoExemplar: bookCellText(row, bookColumns.codigoExemplar),
+          numeroExemplar: bookCellText(row, bookColumns.numeroExemplar),
+          autores:        bookCellText(row, bookColumns.autores),
+          anoPublicacao:  bookCellText(row, bookColumns.anoPublicacao),
+          catalogo:       bookCellText(row, bookColumns.catalogo),
+          codigoRFID:     bookColumns.codigoRFID ? bookCellText(row, bookColumns.codigoRFID) : null,
         });
       });
 
       const skipped = (worksheet.rowCount - 1) - rows.length;
-      console.log(`[IMPORT-BOOKS] ${rows.length} linhas com dados (${skipped} puladas)`);
+      console.log(
+        `[IMPORT-BOOKS] ${rows.length} linhas com dados (${skipped} puladas)`,
+        { bookColumns },
+      );
 
       // ── 3. Buscar existentes em lote ─────────────────────────────────────────
       const patrimonios  = [...new Set(rows.filter(r => r.patrimonio).map(r => r.patrimonio))];
@@ -2230,7 +2593,7 @@ router.post(
         patrimonios.length
           ? prisma.item.findMany({
               where: { inventoryId, patrimonio: { in: patrimonios } },
-              select: { id: true, patrimonio: true, descricao: true },
+              select: { id: true, patrimonio: true, descricao: true, codigoBarras: true },
             })
           : [],
         codBarras.length
@@ -2248,8 +2611,23 @@ router.post(
       const toCreate = [];
       const toMerge  = []; // { id, data }
       const errors   = [];
+      const seenBarcodes = new Set();
+      const claimedExistingIds = new Set();
+      const duplicateRows = [];
 
       for (const r of rows) {
+        if (r.codigoBarras) {
+          if (seenBarcodes.has(r.codigoBarras)) {
+            duplicateRows.push({
+              rowIdx: r.rowIdx,
+              codigoBarras: r.codigoBarras,
+              error: "Código de barras/exemplar duplicado no arquivo",
+            });
+            continue;
+          }
+          seenBarcodes.add(r.codigoBarras);
+        }
+
         const bookFields = {
           codigoBarras:   r.codigoBarras  || null,
           codigoRFID:     r.codigoRFID    || null,
@@ -2257,27 +2635,63 @@ router.post(
           numeroExemplar: r.numeroExemplar || null,
           autores:        r.autores        || null,
           anoPublicacao:  r.anoPublicacao  || null,
+          catalogo:       r.catalogo       || r.codigoExemplar || null,
         };
 
-        if (r.patrimonio) {
+        if (r.codigoBarras) {
+          const existingByBarcode = barrasMap.get(r.codigoBarras);
+          if (existingByBarcode) {
+            toMerge.push({
+              id: existingByBarcode.id,
+              data: {
+                ...bookFields,
+                patrimonio: r.patrimonio || null,
+                descricao: r.titulo || undefined,
+              },
+            });
+            claimedExistingIds.add(existingByBarcode.id);
+            continue;
+          }
+
+          const existingByPatrimonio = r.patrimonio ? patMap.get(r.patrimonio) : null;
+          if (
+            existingByPatrimonio &&
+            !existingByPatrimonio.codigoBarras &&
+            !claimedExistingIds.has(existingByPatrimonio.id)
+          ) {
+            toMerge.push({
+              id: existingByPatrimonio.id,
+              data: {
+                ...bookFields,
+                patrimonio: r.patrimonio,
+                descricao: existingByPatrimonio.descricao || r.titulo || undefined,
+              },
+            });
+            claimedExistingIds.add(existingByPatrimonio.id);
+          } else {
+            toCreate.push({
+              patrimonio: r.patrimonio || null,
+              descricao: r.titulo || "Sem título",
+              condicaoOriginal: "BOM",
+              inventoryId,
+              spaceId: space.id,
+              statusEncontrado: "PENDENTE",
+              ...bookFields,
+            });
+          }
+        } else if (r.patrimonio) {
           const existing = patMap.get(r.patrimonio);
           if (existing) {
             toMerge.push({ id: existing.id, data: { ...bookFields, descricao: existing.descricao || r.titulo || existing.descricao } });
           } else {
             toCreate.push({ patrimonio: r.patrimonio, descricao: r.titulo || "Sem título", condicaoOriginal: "BOM", inventoryId, spaceId: space.id, statusEncontrado: "PENDENTE", ...bookFields });
           }
-        } else {
-          // Sem patrimônio → identificador é o codigoBarras
-          const existing = barrasMap.get(r.codigoBarras);
-          if (existing) {
-            toMerge.push({ id: existing.id, data: bookFields });
-          } else {
-            toCreate.push({ patrimonio: null, descricao: r.titulo || "Sem título", condicaoOriginal: "BOM", inventoryId, spaceId: space.id, statusEncontrado: "PENDENTE", ...bookFields });
-          }
         }
       }
 
-      console.log(`[IMPORT-BOOKS] criar=${toCreate.length} mesclar=${toMerge.length}`);
+      console.log(
+        `[IMPORT-BOOKS] criar=${toCreate.length} mesclar=${toMerge.length} duplicadasNoArquivo=${duplicateRows.length}`,
+      );
 
       // ── 5. Criar novos itens em lote (chunks de 500) ─────────────────────────
       const CHUNK = 500;
@@ -2325,8 +2739,20 @@ router.post(
       res.json({
         success: true,
         spaceName: space.name,
-        summary: { created, merged, skipped, errors: errors.length + createErrors.length },
-        errors: [...createErrors.map(e => ({ error: e })), ...errors].slice(0, 20),
+        summary: {
+          totalRows: worksheet.rowCount - 1,
+          parsedRows: rows.length,
+          created,
+          merged,
+          skipped: skipped + duplicateRows.length,
+          duplicateRows: duplicateRows.length,
+          errors: errors.length + createErrors.length,
+        },
+        errors: [
+          ...createErrors.map(e => ({ error: e })),
+          ...duplicateRows,
+          ...errors,
+        ].slice(0, 20),
       });
     } catch (err) {
       console.error("[IMPORT-BOOKS] Error:", err.message || err);

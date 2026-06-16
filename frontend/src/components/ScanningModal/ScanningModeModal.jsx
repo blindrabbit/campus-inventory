@@ -233,7 +233,37 @@ export default function ScanningModeModal({
 
         {/* Área principal */}
         <div className="px-5 py-4 min-h-[260px] flex flex-col">
-          {totalItems === 0 ? (
+          {lastError ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-red-100 text-red-600">
+                <svg className="h-9 w-9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M12 9v3.75m0 3.75h.01M4.93 19.07a10 10 0 1114.14 0 10 10 0 01-14.14 0z" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-lg font-bold text-red-700">
+                  Item não encontrado
+                </p>
+                <p className="mt-1 text-sm text-gray-600">
+                  Confira a etiqueta e faça a leitura novamente.
+                </p>
+              </div>
+              {lastCode && (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-red-500">
+                    Código lido
+                  </p>
+                  <p className="mt-1 font-mono text-xl font-semibold text-red-800">
+                    {lastCode}
+                  </p>
+                </div>
+              )}
+              <p className="max-w-sm text-xs text-gray-500">
+                O modo leitura continua ativo. Aproxime o leitor do código de barras ou RFID e tente outra vez.
+              </p>
+            </div>
+          ) : totalItems === 0 ? (
             // Estado vazio — aguardando primeira leitura
             <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-400">
               <svg className="w-12 h-12 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -303,12 +333,12 @@ export default function ScanningModeModal({
               Processando leitura...
             </div>
           ) : lastError ? (
-            <div className="flex items-center gap-2 text-red-500 text-xs">
+            <div className="flex items-center gap-2 text-red-600 text-xs">
               <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                   d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
               </svg>
-              <span className="truncate">{lastError}</span>
+              <span className="font-medium">Aguardando nova tentativa</span>
               {lastCode && (
                 <span className="text-gray-400 font-mono ml-auto flex-shrink-0">
                   "{lastCode}"

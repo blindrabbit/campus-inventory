@@ -171,8 +171,9 @@ model Item {
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
 
-  // patrimonio: NULL != NULL no PostgreSQL → múltiplos itens sem patrimônio são permitidos
-  @@unique([inventoryId, patrimonio])
+  // Patrimônio segue indexado para busca; a unicidade para itens sem código de barras
+  // é garantida por índice parcial em migration SQL.
+  @@index([inventoryId, patrimonio])
   // codigoBarras: cada exemplar tem código único por inventário
   @@unique([inventoryId, codigoBarras])
 

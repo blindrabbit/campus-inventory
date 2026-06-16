@@ -247,22 +247,24 @@ async function seed() {
       ultimoConferente: null,
     };
 
-    // Upsert: cria ou atualiza sem duplicar patrimônio
-    const result = await prisma.item.upsert({
+    const existing = await prisma.item.findFirst({
       where: {
-        inventoryId_patrimonio: {
-          inventoryId: defaultInventory.id,
-          patrimonio,
-        },
+        inventoryId: defaultInventory.id,
+        patrimonio,
+        codigoBarras: null,
       },
-      update: { ...itemData, updatedAt: new Date() },
-      create: itemData,
+      select: { id: true },
     });
 
-    if (result.createdAt.getTime() === result.updatedAt.getTime()) {
-      created++;
-    } else {
+    if (existing) {
+      await prisma.item.update({
+        where: { id: existing.id },
+        data: { ...itemData, updatedAt: new Date() },
+      });
       updated++;
+    } else {
+      await prisma.item.create({ data: itemData });
+      created++;
     }
   }
 

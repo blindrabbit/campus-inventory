@@ -190,6 +190,7 @@ test("POST /relocate define wasUnfound=true quando item tem statusEncontrado NAO
 
   const origFindUnique = prisma.item.findUnique;
   const origFindFirst = prisma.space.findFirst;
+  const origSpaceFindUnique = prisma.space.findUnique;
   const origTransaction = prisma.$transaction;
   const origItemUpdate = prisma.item.updateMany;
   const origRelocationUpsert = prisma.relocation.upsert;
@@ -207,6 +208,11 @@ test("POST /relocate define wasUnfound=true quando item tem statusEncontrado NAO
     statusEncontrado: "NAO",
   });
   prisma.space.findFirst = async () => ({ id: "space-2" });
+  prisma.space.findUnique = async () => ({
+    id: "space-1",
+    name: "Sala 101",
+    isFinalized: false,
+  });
   prisma.$transaction = async (callback) => callback(prisma);
   prisma.item.updateMany = async () => ({ count: 1 });
   prisma.relocation.upsert = async (payload) => {
@@ -249,6 +255,7 @@ test("POST /relocate define wasUnfound=true quando item tem statusEncontrado NAO
   } finally {
     prisma.item.findUnique = origFindUnique;
     prisma.space.findFirst = origFindFirst;
+    prisma.space.findUnique = origSpaceFindUnique;
     prisma.$transaction = origTransaction;
     prisma.item.updateMany = origItemUpdate;
     prisma.relocation.upsert = origRelocationUpsert;
@@ -262,6 +269,7 @@ test("POST /relocate define wasUnfound=false quando item tem statusEncontrado PE
 
   const origFindUnique = prisma.item.findUnique;
   const origFindFirst = prisma.space.findFirst;
+  const origSpaceFindUnique = prisma.space.findUnique;
   const origTransaction = prisma.$transaction;
   const origItemUpdate = prisma.item.updateMany;
   const origRelocationUpsert = prisma.relocation.upsert;
@@ -279,6 +287,11 @@ test("POST /relocate define wasUnfound=false quando item tem statusEncontrado PE
     statusEncontrado: "PENDENTE",
   });
   prisma.space.findFirst = async () => ({ id: "space-2" });
+  prisma.space.findUnique = async () => ({
+    id: "space-1",
+    name: "Sala 101",
+    isFinalized: false,
+  });
   prisma.$transaction = async (callback) => callback(prisma);
   prisma.item.updateMany = async () => ({ count: 1 });
   prisma.relocation.upsert = async (payload) => {
@@ -308,6 +321,7 @@ test("POST /relocate define wasUnfound=false quando item tem statusEncontrado PE
   } finally {
     prisma.item.findUnique = origFindUnique;
     prisma.space.findFirst = origFindFirst;
+    prisma.space.findUnique = origSpaceFindUnique;
     prisma.$transaction = origTransaction;
     prisma.item.updateMany = origItemUpdate;
     prisma.relocation.upsert = origRelocationUpsert;
@@ -345,6 +359,7 @@ test("POST /relocate retorna 400 quando destino e igual a origem", async () => {
 
   const origFindUnique = prisma.item.findUnique;
   const origFindFirst = prisma.space.findFirst;
+  const origSpaceFindUnique = prisma.space.findUnique;
 
   prisma.item.findUnique = async () => ({
     id: "item-1",
@@ -354,6 +369,11 @@ test("POST /relocate retorna 400 quando destino e igual a origem", async () => {
     statusEncontrado: "PENDENTE",
   });
   prisma.space.findFirst = async () => ({ id: "space-1" });
+  prisma.space.findUnique = async () => ({
+    id: "space-1",
+    name: "Sala 101",
+    isFinalized: false,
+  });
 
   try {
     const req = {
@@ -370,5 +390,190 @@ test("POST /relocate retorna 400 quando destino e igual a origem", async () => {
   } finally {
     prisma.item.findUnique = origFindUnique;
     prisma.space.findFirst = origFindFirst;
+    prisma.space.findUnique = origSpaceFindUnique;
   }
+});
+
+test("POST /planned-relocations permite troca envolvendo salas lacradas com justificativa", async () => {
+  const handler = getRouteHandler("/planned-relocations");
+
+  const origItemFindMany = prisma.item.findMany;
+  const origSpaceFindMany = prisma.space.findMany;
+  const origTransaction = prisma.$transaction;
+  const origItemUpdate = prisma.item.updateMany;
+  const origRelocationDeleteMany = prisma.relocation.deleteMany;
+  const origRelocationCreateMany = prisma.relocation.createMany;
+  const origHistoricoCreateMany = prisma.itemHistorico.createMany;
+  const origItemCount = prisma.item.count;
+  const origRelocationCount = prisma.relocation.count;
+  const origExecuteRaw = prisma.$executeRaw;
+
+  const itemUpdates = [];
+  let relocationData = null;
+  let historicoData = null;
+
+  prisma.item.findMany = async () => [
+    {
+      id: "item-a",
+      patrimonio: "100",
+      descricao: "Mesa",
+      spaceId: "space-a",
+      statusEncontrado: "SIM",
+      inventoryId: "inv-1",
+      space: { id: "space-a", name: "Sala A", isFinalized: true },
+    },
+    {
+      id: "item-b",
+      patrimonio: "200",
+      descricao: "Cadeira",
+      spaceId: "space-b",
+      statusEncontrado: "NAO",
+      inventoryId: "inv-1",
+      space: { id: "space-b", name: "Sala B", isFinalized: true },
+    },
+  ];
+  prisma.space.findMany = async () => [
+    { id: "space-a", name: "Sala A", isFinalized: true },
+    { id: "space-b", name: "Sala B", isFinalized: true },
+  ];
+  prisma.$transaction = async (callback) => callback(prisma);
+  prisma.item.updateMany = async (payload) => {
+    itemUpdates.push(payload);
+    return { count: 1 };
+  };
+  prisma.relocation.deleteMany = async () => ({ count: 0 });
+  prisma.relocation.createMany = async (payload) => {
+    relocationData = payload.data;
+    return { count: payload.data.length };
+  };
+  prisma.itemHistorico.createMany = async (payload) => {
+    historicoData = payload.data;
+    return { count: payload.data.length };
+  };
+  prisma.item.count = async () => 0;
+  prisma.relocation.count = async () => 0;
+  prisma.$executeRaw = async () => ({});
+
+  try {
+    const req = {
+      body: {
+        reason: "Troca física validada",
+        movements: [
+          { itemId: "item-a", targetSpaceId: "space-b" },
+          { itemId: "item-b", targetSpaceId: "space-a" },
+        ],
+      },
+      inventoryId: "inv-1",
+      inventoryRole: "ADMIN_CICLO",
+      user: { sub: "tester", fullName: "Tester", role: "CONFERENTE" },
+    };
+    const res = createMockResponse();
+
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.updatedCount, 2);
+    assert.equal(res.body.finalizedSpaceTouched, true);
+    assert.deepEqual(
+      itemUpdates.map((payload) => payload.data.spaceId).sort(),
+      ["space-a", "space-b"],
+    );
+    assert.equal(relocationData.length, 2);
+    assert.equal(
+      relocationData.find((row) => row.itemId === "item-b").wasUnfound,
+      true,
+    );
+    assert.equal(historicoData.length, 2);
+    assert.ok(
+      historicoData.every((row) => row.reason === "Troca física validada"),
+    );
+    assert.ok(
+      historicoData.every((row) =>
+        row.metadata.includes('"source":"planned-relocation"'),
+      ),
+    );
+  } finally {
+    prisma.item.findMany = origItemFindMany;
+    prisma.space.findMany = origSpaceFindMany;
+    prisma.$transaction = origTransaction;
+    prisma.item.updateMany = origItemUpdate;
+    prisma.relocation.deleteMany = origRelocationDeleteMany;
+    prisma.relocation.createMany = origRelocationCreateMany;
+    prisma.itemHistorico.createMany = origHistoricoCreateMany;
+    prisma.item.count = origItemCount;
+    prisma.relocation.count = origRelocationCount;
+    prisma.$executeRaw = origExecuteRaw;
+  }
+});
+
+test("POST /planned-relocations exige justificativa ao envolver sala lacrada", async () => {
+  const handler = getRouteHandler("/planned-relocations");
+
+  const origItemFindMany = prisma.item.findMany;
+  const origSpaceFindMany = prisma.space.findMany;
+  const origTransaction = prisma.$transaction;
+
+  let transactionCalled = false;
+
+  prisma.item.findMany = async () => [
+    {
+      id: "item-a",
+      patrimonio: "100",
+      descricao: "Mesa",
+      spaceId: "space-a",
+      statusEncontrado: "SIM",
+      inventoryId: "inv-1",
+      space: { id: "space-a", name: "Sala A", isFinalized: true },
+    },
+  ];
+  prisma.space.findMany = async () => [
+    { id: "space-b", name: "Sala B", isFinalized: false },
+  ];
+  prisma.$transaction = async () => {
+    transactionCalled = true;
+  };
+
+  try {
+    const req = {
+      body: {
+        movements: [{ itemId: "item-a", targetSpaceId: "space-b" }],
+      },
+      inventoryId: "inv-1",
+      inventoryRole: "ADMIN_CICLO",
+      user: { sub: "tester", role: "CONFERENTE" },
+    };
+    const res = createMockResponse();
+
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 400);
+    assert.ok(res.body.error.includes("justificativa"));
+    assert.equal(transactionCalled, false);
+  } finally {
+    prisma.item.findMany = origItemFindMany;
+    prisma.space.findMany = origSpaceFindMany;
+    prisma.$transaction = origTransaction;
+  }
+});
+
+test("POST /planned-relocations rejeita patrimônio repetido na lista", async () => {
+  const handler = getRouteHandler("/planned-relocations");
+
+  const req = {
+    body: {
+      movements: [
+        { itemId: "item-a", targetSpaceId: "space-b" },
+        { itemId: "item-a", targetSpaceId: "space-c" },
+      ],
+    },
+    inventoryId: "inv-1",
+    inventoryRole: "ADMIN_CICLO",
+    user: { sub: "tester", role: "CONFERENTE" },
+  };
+  const res = createMockResponse();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.ok(res.body.error.includes("mais de uma vez"));
 });

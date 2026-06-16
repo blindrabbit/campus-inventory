@@ -26,6 +26,7 @@ Sistema web colaborativo para mapeamento, consulta e gestão de inventário fís
 ## 🔄 Princípio de Fidelidade de Dados (Data Fidelity)
 - **Compatibilidade Estrita**: O sistema deve importar e exportar dados mantendo 100% da estrutura de colunas do arquivo base (`inventario.xlsx`).
 - **Não Perda de Informação**: Nenhuma informação administrativa (Código SIA, Patrimônio, CNPJ, Valores, Datas) pode ser perdida ou alterada indevidamente.
+- **Identificadores Alternativos de Acervo**: Para biblioteca/acervo, o sistema deve preservar exemplares com ou sem patrimônio usando código de barras/RFID como identificadores válidos, sem deduplicar indevidamente registros distintos.
 - **Enriquecimento Progressivo**: O sistema adicionará dados operacionais (Geolocalização/Mapa, Foto, Status de Conferência) sem quebrar o formato original de exportação.
 - **Exportação "Pronta para Uso"**: O arquivo exportado deve estar pronto para ser reenviado à administração central sem necessidade de ajustes manuais em planilhas.
 

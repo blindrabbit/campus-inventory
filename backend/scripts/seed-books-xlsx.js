@@ -215,30 +215,24 @@ async function seed() {
           created++;
         }
       } else {
-        // Fallback: upsert pelo patrimônio (item sem código de barras)
-        await prisma.item.upsert({
+        // Fallback: atualiza por patrimônio apenas para item sem código de barras.
+        const existing = await prisma.item.findFirst({
           where: {
-            inventoryId_patrimonio: {
-              inventoryId: inventory.id,
-              patrimonio: patrimonio,
-            },
+            inventoryId: inventory.id,
+            patrimonio,
+            codigoBarras: null,
           },
-          update: { ...itemData, updatedAt: new Date() },
-          create: itemData,
+          select: { id: true },
         });
 
-        const existsAlready = await prisma.item.findUnique({
-          where: {
-            inventoryId_patrimonio: {
-              inventoryId: inventory.id,
-              patrimonio: patrimonio,
-            },
-          },
-          select: { createdAt: true, updatedAt: true },
-        });
-        if (existsAlready && existsAlready.createdAt.getTime() !== existsAlready.updatedAt.getTime()) {
+        if (existing) {
+          await prisma.item.update({
+            where: { id: existing.id },
+            data: { ...itemData, updatedAt: new Date() },
+          });
           updated++;
         } else {
+          await prisma.item.create({ data: itemData });
           created++;
         }
       }

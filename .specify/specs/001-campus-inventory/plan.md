@@ -69,7 +69,7 @@ model Space {
 
 model Item {
   id                String    @id @default(cuid())
-  patrimonio        String    @unique
+  patrimonio        String?
   descricao         String
   valor             Decimal?
   condicaoOriginal  String
@@ -87,9 +87,26 @@ model Item {
   dataConferencia   DateTime?
   ultimoConferente  String?
 
+  codigoBarras      String?
+  codigoRFID        String?
+  numeroExemplar    String?
+  codigoExemplar    String?
+  autores           String?
+  anoPublicacao     String?
+
   relocationIn      Relocation? @relation("RelocationTarget")
+
+  @@index([inventoryId, patrimonio])
+  @@unique([inventoryId, codigoBarras])
 }
 ```
+
+Observações de integridade:
+
+- `codigoBarras` é a chave única preferencial para exemplares de acervo bibliográfico.
+- Patrimônio não é mais único globalmente quando o item possui `codigoBarras`.
+- A unicidade patrimonial de itens comuns é garantida por índice parcial SQL: `(inventoryId, patrimonio) WHERE patrimonio IS NOT NULL AND codigo_barras IS NULL`.
+- Essa regra permite importar todos os exemplares da biblioteca sem quebrar a regra de patrimônio único para bens comuns.
 
 ## 7. Arquitetura de Realocação em Tempo Real
 
@@ -142,12 +159,15 @@ enum CondicaoVis { EXCELENTE, BOM, INSERVIVEL }
 POST /api/auth/login → { sAMAccountName, password } → LDAP bind → JWT
 GET /api/spaces/active → Lista espaços não finalizados
 GET /api/items?spaceId=:id → Retorna itens com status e relocações pendentes
+GET /api/items/search?q=:term → Busca por patrimônio, código de barras, RFID, descrição e autores
 POST /api/items/check → { itemId, condicao } → Atualiza statusEncontrado=SIM, debounce 1s
 POST /api/items/relocate → { itemId, targetSpaceId } → Cria registro Relocation com flag pendingConfirm
+POST /api/items/planned-relocations → { movements: [{ itemId, targetSpaceId }], reason } → Executa movimentações planejadas em lote, inclusive com salas lacradas mediante justificativa
 POST /api/items/unfound → { itemId } → statusEncontrado=NAO, remove da lista ativa
 POST /api/items/uncheck → { itemId } → desfaz encontrado, volta para PENDENTE e registra histórico
 POST /api/items/:itemId/restore → estorna realocação pendente e registra histórico com origem/destino
 GET /api/audit/space-movements → retorna histórico de atualizações por sala (ações + data/hora)
+POST /api/items/import-books → importa acervo bibliográfico por XLSX, detectando cabeçalhos e priorizando upsert por código de barras/exemplar
 POST /api/spaces/:id/finalize → Bloqueia espaço, gera log de auditoria
 
 ## 4.1. Contratos de Permissão por Inventário (Fase 11)

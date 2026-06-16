@@ -200,6 +200,8 @@ router.get(
         }),
       ]);
 
+      const nameMap = await buildNameMap(history.map((entry) => entry.createdBy));
+
       const items = history.map((entry) => {
         const isEntry =
           entry.toSpaceId === spaceId && entry.fromSpaceId !== spaceId;
@@ -215,7 +217,7 @@ router.get(
           direction: isEntry ? "ENTRADA" : isExit ? "SAIDA" : "INTERNO",
           fromSpaceName: entry.fromSpace?.name || null,
           toSpaceName: entry.toSpace?.name || null,
-          createdBy: entry.createdBy,
+          createdBy: nameMap[entry.createdBy] || entry.createdBy,
           createdAt: entry.createdAt,
           reason: entry.reason,
         };

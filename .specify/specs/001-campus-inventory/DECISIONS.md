@@ -466,3 +466,106 @@ Ao confirmar:
 
 - Spec: `.specify/specs/001-campus-inventory/spec.md#seleção-de-espaço`
 - Spec: `.specify/specs/001-campus-inventory/spec.md#consistência-de-quantitativo`
+
+## ADR-011: Movimentação Planejada em Lote com Suporte a Salas Lacradas
+
+**Data**: 2026-06-16
+**Status**: APROVADO
+**Impacto**: Auditoria, Operação, Permissões, UX
+
+### Contexto
+
+No uso cotidiano do campus, patrimônios podem ser trocados entre salas sem que o operador precise entrar individualmente em cada sala. Algumas dessas salas já podem estar finalizadas/lacradas.
+
+### Problema
+
+- A realocação unitária existente bloqueia movimentações envolvendo sala finalizada.
+- Trocas A/B entre salas exigem uma lista completa antes da execução para evitar estado intermediário inconsistente.
+- Alterar a regra da movimentação comum aumentaria risco de regressão no fluxo de conferência.
+
+### Decisão
+
+Criar uma funcionalidade separada de movimentação planejada:
+
+- Frontend em `/dashboard/movimentacoes`
+- Backend em `POST /api/items/planned-relocations`
+- Payload com lista de `{ itemId, targetSpaceId }`
+- Execução transacional
+- Permissão restrita a `ADMIN` global ou `ADMIN_CICLO`
+- Justificativa obrigatória quando origem ou destino estiver lacrado/finalizado
+- Registro de `ItemHistorico` com `fromSpaceId`, `toSpaceId`, `reason` e metadata `source=planned-relocation`
+- Sem reabrir automaticamente salas finalizadas
+
+### Consequências
+
+✅ **Positivas:**
+
+- Mantém a realocação comum sem mudança de regra.
+- Suporta trocas físicas complexas entre salas.
+- Preserva histórico nas duas salas afetadas.
+- Dá controle administrativo explícito para alterações em sala lacrada.
+
+⚠️ **Negativas:**
+
+- Exige uma tela e endpoint adicionais.
+- Requer cuidado na comunicação visual para diferenciar movimentação administrativa de conferência comum.
+
+### Alternativas Consideradas
+
+1. Flexibilizar a rota `/items/relocate` existente → Rejeitada: risco alto para o fluxo operacional das salas.
+2. Reabrir automaticamente salas lacradas → Rejeitada: alteraria o estado de conferência sem intenção explícita.
+
+### Referências
+
+- Spec: `.specify/specs/001-campus-inventory/spec.md#62-movimentação-planejada-de-patrimônios`
+
+## ADR-012: Código de Barras como Chave Principal do Acervo Bibliográfico
+
+**Data**: 2026-06-16
+**Status**: APROVADO
+**Impacto**: Modelo de Dados, Importação XLSX, Busca, Operação
+
+### Contexto
+
+A biblioteca possui exemplares com e sem patrimônio. O arquivo real de acervo contém mais de 10 mil linhas, com `exemplar` único para cada registro e muitos itens sem `Número do patrimônio`.
+
+### Problema
+
+- O importador antigo usava posições fixas de coluna, incompatíveis com o XLSX real.
+- A coluna lida como patrimônio era, nesse arquivo, `Código da moeda`, causando mesclas indevidas.
+- Patrimônio não identifica de forma segura todos os exemplares de livro.
+- A constraint única `(inventoryId, patrimonio)` bloqueia exemplares de acervo quando um patrimônio se repete.
+
+### Decisão
+
+- Detectar colunas pelo cabeçalho do XLSX, mantendo fallback legado.
+- Usar `exemplar`/`codigoBarras` como chave principal do acervo.
+- Manter `patrimonio` como campo importado e como fallback apenas quando não há `codigoBarras`.
+- Trocar a unicidade global de patrimônio por:
+  - índice comum `(inventoryId, patrimonio)` para busca
+  - índice único parcial `(inventoryId, patrimonio) WHERE patrimonio IS NOT NULL AND codigo_barras IS NULL`
+  - índice único `(inventoryId, codigo_barras)` para exemplares de acervo
+
+### Consequências
+
+✅ **Positivas:**
+
+- Permite importar todos os exemplares do arquivo da biblioteca.
+- Preserva a regra de patrimônio único para bens comuns.
+- Permite busca manual por código de barras quando o leitor falhar.
+- Reduz dependência de layouts fixos de XLSX.
+
+⚠️ **Negativas:**
+
+- Scripts antigos que usavam `inventoryId_patrimonio` precisaram migrar para `findFirst + update/create`.
+- Operadores devem entender que, para acervo, o código de barras é o identificador primário.
+
+### Alternativas Consideradas
+
+1. Remover completamente a unicidade de patrimônio → Rejeitada: enfraquece regra patrimonial de bens comuns.
+2. Manter patrimônio como chave principal para livros → Rejeitada: não representa todos os exemplares e causa perda/mescla de registros.
+3. Exigir layout fixo da biblioteca → Rejeitada: frágil para exportações heterogêneas.
+
+### Referências
+
+- Spec: `.specify/specs/001-campus-inventory/spec.md#importação-de-acervo-livros`

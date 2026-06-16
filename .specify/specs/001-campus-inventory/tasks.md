@@ -303,6 +303,66 @@ Testar offline: Desconectar rede → Confirmar item → Reconectar → Verificar
 - [x] Frontend: exibir prévia com total de itens afetados antes de confirmar ação em massa
 - [ ] QA: validar cenários de biblioteca e carteiras com intervalos contínuos e intervalos com lacunas
 
+## 📦 Fase 17: Movimentação Planejada e Menu Administrativo
+
+### Backend
+
+- [x] Criar endpoint `POST /api/items/planned-relocations`
+- [x] Permitir lista de pares `itemId + targetSpaceId`
+- [x] Validar item repetido, destino inválido e destino igual à origem
+- [x] Permitir origem/destino em sala lacrada apenas com justificativa
+- [x] Executar movimentações em transação
+- [x] Atualizar `spaceId`, `lastKnownSpaceId`, `statusEncontrado` e `Relocation`
+- [x] Registrar `ItemHistorico` com `reason`, origem/destino e metadata `source=planned-relocation`
+- [x] Recalcular contadores das salas afetadas
+- [x] Emitir SSE para salas origem e destino
+- [x] Resolver nome completo no retorno de `/api/audit/space-movements`
+
+### Frontend
+
+- [x] Criar página `/dashboard/movimentacoes`
+- [x] Permitir busca de item, seleção de sala destino e montagem/remoção de lista
+- [x] Exigir justificativa quando houver sala lacrada
+- [x] Colorir estados de sala e status do item na tela de movimentações
+- [x] Agrupar atalhos administrativos no menu colapsável `Administração`
+- [x] Garantir que o dropdown expanda fora da área de scroll das abas
+- [x] Mover `Movimentações`, `Acompanhamento`, `Auditoria`, `Usuários`, `Dados`, `Backups` e `Relatório de Eventos` para o menu
+- [x] Apontar `Dados` para `/admin/dados` para acesso à importação de acervo
+
+### QA
+
+- [x] Teste backend: troca envolvendo salas lacradas com justificativa
+- [x] Teste backend: justificativa obrigatória para sala lacrada
+- [x] Teste backend: item repetido rejeitado
+- [x] Build frontend validado
+
+## 📚 Fase 18: Acervo Bibliográfico, Busca por Código de Barras e Modo Leitura
+
+### Backend
+
+- [x] Detectar colunas do XLSX de acervo pelo cabeçalho
+- [x] Priorizar `exemplar`/`codigoBarras` como chave de importação
+- [x] Permitir livros sem patrimônio
+- [x] Permitir patrimônio repetido para exemplares com `codigoBarras`
+- [x] Adicionar migration com índice parcial para preservar patrimônio único em itens comuns sem código de barras
+- [x] Atualizar seed scripts para não depender de `inventoryId_patrimonio`
+- [x] Incluir `codigoBarras`, `codigoRFID` e `autores` na busca `/api/items/search`
+- [x] Manter `GET /api/items/scan` buscando por `codigoBarras`, `codigoRFID` e `patrimonio`
+
+### Frontend
+
+- [x] Exibir código de barras/RFID nos resultados da busca manual da sala
+- [x] Atualizar placeholder e mensagens para patrimônio ou código de barras
+- [x] Melhorar estado de erro do modo leitura quando item não é encontrado
+- [x] Manter foco do modo leitura para nova tentativa após erro
+
+### QA
+
+- [x] Simulação no arquivo `kellyra_2026-06-12-17-19-44.xlsx`: `10.336/10.336` linhas processáveis
+- [x] `prisma validate` executado com sucesso
+- [x] `node --test` executado com sucesso
+- [x] Build frontend validado
+
 ## 🎯 Critérios de Aceite do MVP
 
 Login LDAP funciona com usuário real da instituição

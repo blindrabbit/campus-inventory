@@ -206,6 +206,11 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
   - aba/seção `Permissões` (gestão de servidores com acesso)
   - aba/seção `Dados` (nome do inventário, responsável, início, fim, status e metadados)
 - A visibilidade das abas administrativas deve respeitar o perfil do usuário no inventário.
+- Ações administrativas secundárias devem ficar agrupadas no menu colapsável `Administração`, reduzindo a ocupação horizontal do dashboard.
+- O menu `Administração` deve conter, conforme permissão: `Movimentações`, `Acompanhamento`, `Auditoria`, `Usuários`, `Dados`, `Backups` e `Relatório de Eventos`.
+- O item `Dados` do menu deve abrir `/admin/dados`, onde fica a importação de acervo bibliográfico.
+- O item `Relatório de Eventos` permanece restrito ao perfil `ADMIN` global.
+- O dropdown desktop deve expandir fora da área de rolagem das abas principais, sem criar scroll horizontal interno.
 - A caixa de acesso às abas, posicionada ao final da lista de espaços, deve ser unificada com a própria caixa de conteúdo das abas.
 - A navegação das abas e o conteúdo da aba ativa devem existir no mesmo container visual (header de abas + painel), evitando caixas separadas para acesso e exibição.
 - O container de abas deve priorizar flexibilidade de acesso:
@@ -283,8 +288,9 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
 
 ### 6. Validação de Patrimônio Não Listado
 
-- Input manual aceita apenas números de patrimônio existentes no banco
-- Se não encontrar: toast de erro `"Patrimônio não consta no registro oficial."`
+- Input manual aceita patrimônio, código de barras, RFID, descrição e autores.
+- Para livros/acervo, a busca deve localizar itens por `codigoBarras` mesmo quando o item não possui patrimônio.
+- Se não encontrar: toast de erro informando que nenhum patrimônio ou código de barras consta no registro oficial.
 - **Não cria** registros temporários ou pendentes
 
 ### 6.1. Encontrado em Massa por Intervalo de Patrimônio
@@ -298,6 +304,19 @@ Cada verificação de inventário deve ser representada por um **ciclo** com met
   - intervalo inclusivo (`inicial` e `final` fazem parte do lote)
   - cada item atualizado deve gerar trilha de auditoria (`ENCONTRADO`)
   - patrimônios fora do intervalo ou inválidos entram no resumo de ignorados, sem falhar toda operação
+
+### 6.2. Movimentação Planejada de Patrimônios
+
+- Deve existir página `/dashboard/movimentacoes` para montar uma lista de movimentações antes da execução.
+- O usuário autorizado deve adicionar/remover pares `item + sala destino` até fechar a lista completa.
+- A execução deve ocorrer em uma única confirmação transacional, permitindo trocas entre salas (A ↔ B).
+- A operação deve permitir origem e destino em salas lacradas/finalizadas sem reabrir a sala.
+- Quando qualquer sala lacrada/finalizada estiver envolvida, a justificativa é obrigatória.
+- Acesso restrito a `ADMIN` global ou `ADMIN_CICLO`.
+- Cada item movimentado deve atualizar `spaceId`, `lastKnownSpaceId`, `Relocation` pendente e `statusEncontrado=PENDENTE`.
+- Cada item movimentado deve gerar `ItemHistorico` com ação `REALOCADO`, `fromSpaceId`, `toSpaceId`, `reason` e metadata `source=planned-relocation`.
+- A movimentação deve aparecer no histórico da sala origem como `SAIDA` e no histórico da sala destino como `ENTRADA`.
+- A interface deve colorir estados de sala (`Não iniciada`, `Iniciada`, `Lacrada`, `Confirmada`) e status do item (`Pendente`, `Encontrado`, `Não localizado`).
 
 ### 7. Auto-Save & Offline
 
@@ -377,6 +396,14 @@ Acessibilidade:
 Atalho Ctrl+K / Cmd+K foca no input
 Navegação por setas ↑↓ e Enter para selecionar
 ESC fecha o dropdown
+
+**Busca de Patrimônios, Itens e Acervo**
+
+- A busca manual de itens deve consultar `patrimonio`, `codigoBarras`, `codigoRFID`, `descricao` e `autores`.
+- Correspondência exata por `codigoBarras`, `codigoRFID` ou patrimônio numérico deve ter prioridade sobre busca textual.
+- O resultado deve exibir `codigoBarras` e `codigoRFID` quando disponíveis.
+- A busca deve aceitar digitação manual do código de barras para casos em que o leitor não consiga ler a etiqueta.
+- A busca deve tolerar zeros à esquerda em identificadores numéricos quando possível.
 
 **CRUD de Espaços (ADMIN apenas)**
 Rota: /admin/spaces
@@ -558,6 +585,8 @@ Disponível na tela de conferência (`/room/[spaceId]`) para perfis com permiss�
 - Ao pressionar Enter, o código acumulado é enviado para busca; o item é confirmado automaticamente (`statusEncontrado = SIM`)
 - Se o item pertencer a outra sala, é realocado imediatamente para a sala atual (sem aguardar confirmação)
 - Normalização de zeros à esquerda: `04685874` encontra item armazenado como `4685874` em qualquer dos campos `codigoBarras`, `codigoRFID` ou `patrimonio`
+- Quando o item não for encontrado, o modal deve mostrar aviso central claro com título `Item não encontrado`, código lido em destaque e orientação para tentar a leitura novamente.
+- Após erro de leitura, o input oculto deve manter foco para permitir nova tentativa sem fechar o modal.
 
 ### Desfazer leitura
 
@@ -599,6 +628,24 @@ Itens de acervo podem não possuir número de patrimônio. Os campos extras supo
 
 ### Formato XLSX esperado (exportação da biblioteca)
 
+O importador deve detectar colunas pelo cabeçalho e manter fallback para layouts legados.
+
+Cabeçalhos principais do layout atual da biblioteca:
+
+| Cabeçalho | Campo interno |
+|---|---|
+| `exemplar` | `codigoBarras` (identificador principal) |
+| `Número do patrimônio` | `patrimonio` (opcional) |
+| `Título` | `descricao` |
+| `Autor` | `autores` |
+| `Ano` | `anoPublicacao` |
+| `Código do acervo` | `codigoExemplar` / `catalogo` |
+| `Número do exemplar` | `numeroExemplar` |
+| `Classificação` | `catalogo` |
+| `RFID` / `Código RFID` | `codigoRFID` |
+
+Fallback legado:
+
 | Coluna | Campo |
 |---|---|
 | B | Código de barras |
@@ -612,9 +659,13 @@ Itens de acervo podem não possuir número de patrimônio. Os campos extras supo
 
 ### Comportamento de importação
 
-- Upsert por `codigoBarras` (preferencial) ou `patrimonio`
-- Itens com `codigoBarras` novo + `patrimonio` existente → mesclam campos bibliográficos no item já cadastrado
+- Upsert por `codigoBarras` (preferencial); `patrimonio` é fallback apenas quando não há `codigoBarras`
+- Itens com `codigoBarras` novo + `patrimonio` existente mesclam campos bibliográficos apenas se o item patrimonial existente ainda não possuir `codigoBarras`
 - Itens totalmente novos (sem patrimônio, sem barras correspondente) → criados como acervo (`patrimonio = null`)
+- `codigoBarras` é único por inventário.
+- Patrimônio permanece único para itens comuns sem `codigoBarras`; exemplares de acervo podem repetir patrimônio quando possuem `codigoBarras` próprio.
+- Linhas duplicadas pelo mesmo `codigoBarras` dentro do XLSX devem ser ignoradas com erro detalhado, sem falhar todo o lote.
+- O resumo da importação deve retornar `totalRows`, `parsedRows`, `created`, `merged`, `skipped`, `duplicateRows` e `errors`.
 - Após importação bem-sucedida, SSE `items_imported` atualiza automaticamente as salas abertas
 
 ---

@@ -1051,10 +1051,10 @@ export default function RoomPage() {
       if (data.length === 0) {
         showToast({
           type: "error",
-          title: "Patrimônio não encontrado",
-          message: "Patrimônio não consta no registro oficial.",
+          title: "Item não encontrado",
+          message: "Nenhum patrimônio ou código de barras consta no registro oficial.",
         });
-        setSearchError("Nenhum patrimônio encontrado para este termo");
+        setSearchError("Nenhum patrimônio ou código de barras encontrado para este termo");
       }
     } catch (err) {
       const message = err.response?.data?.error || "Erro ao buscar patrimônios";
@@ -2174,7 +2174,7 @@ export default function RoomPage() {
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="Ex: 8038 ou MONITOR DELL"
+                    placeholder="Ex: 8038, código de barras ou MONITOR DELL"
                     className="flex-1 border rounded-lg px-3 py-2"
                   />
                   <button
@@ -2221,11 +2221,26 @@ export default function RoomPage() {
                         >
                           <div className="flex-1 min-w-0">
                             <p className="font-semibold text-sm">
-                              #{candidate.patrimonio}
+                              #{candidate.patrimonio || candidate.codigoBarras || "sem patrimônio"}
                             </p>
                             <p className="text-sm text-gray-700">
                               {candidate.descricao}
                             </p>
+                            {(candidate.codigoBarras || candidate.codigoRFID) && (
+                              <p className="mt-1 text-xs text-gray-500">
+                                {candidate.codigoBarras && (
+                                  <span className="font-mono">
+                                    Cód. barras: {candidate.codigoBarras}
+                                  </span>
+                                )}
+                                {candidate.codigoBarras && candidate.codigoRFID && " • "}
+                                {candidate.codigoRFID && (
+                                  <span className="font-mono">
+                                    RFID: {candidate.codigoRFID}
+                                  </span>
+                                )}
+                              </p>
+                            )}
 	                            <p className="text-xs text-gray-500">
 	                              {isInCurrentRoom
 	                                ? `Já está nesta sala${candidate.spaceName ? ` • ${candidate.spaceName}` : ""}`

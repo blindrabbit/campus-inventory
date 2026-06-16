@@ -87,19 +87,8 @@ const DASHBOARD_TABS = [
     id: "criar-grupos",
     label: "Criar Grupos",
   },
-  {
-    id: "usuarios",
-    label: "Usuarios",
-  },
-  {
-    id: "dados",
-    label: "Dados",
-  },
-  {
-    id: "backups",
-    label: "Backups",
-  },
 ];
+const ADMIN_MENU_TAB_IDS = ["usuarios", "dados", "backups"];
 
 export default function DashboardPage() {
   const [spaces, setSpaces] = useState([]);
@@ -193,6 +182,7 @@ export default function DashboardPage() {
   const [backupDeleteId, setBackupDeleteId] = useState(null);
   const [backupConfirmAction, setBackupConfirmAction] = useState(null); // "restore" | "delete"
   const [dashboardRecentEvents, setDashboardRecentEvents] = useState([]);
+  const [adminMenuOpen, setAdminMenuOpen] = useState(false);
 
   // Banner de retomada de sessão
   const [sessionSummary, setSessionSummary] = useState(null);
@@ -584,7 +574,8 @@ export default function DashboardPage() {
 
   useEffect(() => {
     const tabIsVisible = visibleTabs.some((tab) => tab.id === activeTab);
-    if (!tabIsVisible) {
+    const tabIsAdminMenu = isInventoryAdmin && ADMIN_MENU_TAB_IDS.includes(activeTab);
+    if (!tabIsVisible && !tabIsAdminMenu) {
       setActiveTab("espacos");
     }
 
@@ -613,7 +604,7 @@ export default function DashboardPage() {
         loadBackupInventories(activeInventory?.id);
       }
     }
-  }, [activeTab, visibleTabs, unfoundSubTab]);
+  }, [activeTab, visibleTabs, unfoundSubTab, isInventoryAdmin]);
 
   // Reload backup data whenever the selected inventory changes
   useEffect(() => {
@@ -1745,8 +1736,8 @@ export default function DashboardPage() {
 
         <div className="mb-6 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
           <div className="hidden sm:block">
-            <nav className="flex items-center gap-2 overflow-x-auto">
-              <div className="flex min-w-max gap-2">
+            <nav className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
                 {visibleTabs.map((tab) => {
                   const isActive = activeTab === tab.id;
                   return (
@@ -1764,41 +1755,92 @@ export default function DashboardPage() {
                     </button>
                   );
                 })}
+                <button
+                  type="button"
+                  onClick={() => router.push("/dashboard/ajuda")}
+                  className="rounded-lg bg-sky-50 px-4 py-2 text-sm font-medium text-sky-800 transition hover:bg-sky-100"
+                >
+                  Ajuda
+                </button>
               </div>
               {hasAuditAccess ? (
-                <div className="ml-auto flex gap-2">
+                <div className="relative ml-auto">
                   <button
                     type="button"
-                    onClick={() => router.push("/dashboard/estrategico")}
-                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
+                    onClick={() => setAdminMenuOpen((open) => !open)}
+                    aria-expanded={adminMenuOpen}
+                    className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                   >
-                    Acompanhamento
+                    Administração
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => router.push("/admin/unfound-items")}
-                    className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
-                  >
-                    Auditoria
-                  </button>
-                  {user?.role === "ADMIN" && (
-                    <>
+                  {adminMenuOpen ? (
+                    <div className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
                       <button
                         type="button"
-                        onClick={() => router.push("/admin/dados")}
-                        className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
+                        onClick={() => router.push("/dashboard/movimentacoes")}
+                        className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
                       >
-                        Dados
+                        Movimentações
                       </button>
                       <button
                         type="button"
-                        onClick={() => router.push("/admin/event-log")}
-                        className="rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
+                        onClick={() => router.push("/dashboard/estrategico")}
+                        className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
                       >
-                        Relatório de Eventos
+                        Acompanhamento
                       </button>
-                    </>
-                  )}
+                      <button
+                        type="button"
+                        onClick={() => router.push("/admin/unfound-items")}
+                        className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        Auditoria
+                      </button>
+                      {isInventoryAdmin ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveTab("usuarios");
+                              setAdminMenuOpen(false);
+                            }}
+                            className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            Usuários
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              router.push("/admin/dados");
+                              setAdminMenuOpen(false);
+                            }}
+                            className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            Dados
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveTab("backups");
+                              setAdminMenuOpen(false);
+                            }}
+                            className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            Backups
+                          </button>
+                        </>
+                      ) : null}
+                      {user?.role === "ADMIN" ? (
+                        <button
+                          type="button"
+                          onClick={() => router.push("/admin/event-log")}
+                          className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          Relatório de Eventos
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </nav>
@@ -1816,6 +1858,7 @@ export default function DashboardPage() {
               value={activeTab}
               onChange={(event) => {
                   if (event.target.value === "estrategico") { router.push("/dashboard/estrategico"); }
+                  else if (event.target.value === "ajuda") { router.push("/dashboard/ajuda"); }
                   else { setActiveTab(event.target.value); }
                 }}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
@@ -1825,42 +1868,78 @@ export default function DashboardPage() {
                   {tab.label}
                 </option>
               ))}
+              <option value="ajuda">Ajuda</option>
             </select>
+            <button
+              type="button"
+              onClick={() => router.push("/dashboard/ajuda")}
+              className="mt-3 w-full rounded-lg bg-sky-50 px-4 py-2 text-sm font-medium text-sky-800 transition hover:bg-sky-100"
+            >
+              Ajuda operacional
+            </button>
             {hasAuditAccess ? (
-              <div className="mt-3 flex flex-col gap-2">
+              <details className="mt-3 rounded-lg border border-slate-200 bg-white">
+                <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-slate-700">
+                  Administração
+                </summary>
+                <div className="border-t border-slate-100 py-1">
+                <button
+                  type="button"
+                  onClick={() => router.push("/dashboard/movimentacoes")}
+                  className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Movimentações
+                </button>
                 <button
                   type="button"
                   onClick={() => router.push("/dashboard/estrategico")}
-                  className="w-full rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
+                  className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
                 >
                   Acompanhamento
                 </button>
                 <button
                   type="button"
                   onClick={() => router.push("/admin/unfound-items")}
-                  className="w-full rounded-lg border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
+                  className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
                 >
                   Auditoria
                 </button>
-                {user?.role === "ADMIN" && (
+                {isInventoryAdmin ? (
                   <>
                     <button
                       type="button"
+                      onClick={() => setActiveTab("usuarios")}
+                      className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      Usuários
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => router.push("/admin/dados")}
-                      className="w-full rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
+                      className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
                     >
                       Dados
                     </button>
                     <button
                       type="button"
-                      onClick={() => router.push("/admin/event-log")}
-                      className="w-full rounded-lg border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 transition hover:bg-violet-100"
+                      onClick={() => setActiveTab("backups")}
+                      className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
                     >
-                      Relatório de Eventos
+                      Backups
                     </button>
                   </>
-                )}
-              </div>
+                ) : null}
+                {user?.role === "ADMIN" ? (
+                  <button
+                    type="button"
+                    onClick={() => router.push("/admin/event-log")}
+                    className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Relatório de Eventos
+                  </button>
+                ) : null}
+                </div>
+              </details>
             ) : null}
           </div>
         </div>

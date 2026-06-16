@@ -1,10 +1,10 @@
 # Execution Report: Campus Inventory MVP
 
-Data da validação: 2026-04-09
+Data da validação: 2026-06-16
 
 ## Resumo
 
-O checklist foi atualizado apenas para itens com evidência no código do repositório. Além das fases iniciais do MVP, também estão implementadas no estado atual as fases de múltiplos inventários, permissões por inventário, administração de status/metadados, UX de inventários por abas, CRUD global de usuários e importação de portaria da comissão por PDF com resolução estrita por SIAPE. Permanecem pendentes os testes manuais finais de QA/acessibilidade/mobile.
+O checklist foi atualizado apenas para itens com evidência no código do repositório. Além das fases iniciais do MVP, também estão implementadas no estado atual as fases de múltiplos inventários, permissões por inventário, administração de status/metadados, UX de inventários por abas, CRUD global de usuários, importação de portaria da comissão por PDF com resolução estrita por SIAPE, movimentação planejada em lote, importação de acervo bibliográfico por código de barras e melhorias de busca/modo leitura. Permanecem pendentes os testes manuais finais de QA/acessibilidade/mobile.
 
 ## Itens validados como executados
 
@@ -80,6 +80,50 @@ Inclui:
 ### Fase 5: Exportação Compatível
 
 Implementado em [backend/src/routes/export.routes.js](backend/src/routes/export.routes.js). A nova rota [GET /api/export/xlsx](backend/src/routes/export.routes.js) gera a planilha no formato limpo baseado em [planilha_campus_aracruz_05032025.xlsx](../../planilha_campus_aracruz_05032025.xlsx).
+
+### Fase 17: Movimentação Planejada e Menu Administrativo
+
+Implementado em [backend/src/routes/item.routes.js](backend/src/routes/item.routes.js), [backend/src/routes/audit.routes.js](backend/src/routes/audit.routes.js), [frontend/src/app/dashboard/movimentacoes/page.js](frontend/src/app/dashboard/movimentacoes/page.js), [frontend/src/app/dashboard/page.js](frontend/src/app/dashboard/page.js) e [backend/test/item-relocate.route.test.js](backend/test/item-relocate.route.test.js).
+
+Inclui:
+
+- endpoint `POST /api/items/planned-relocations`
+- execução transacional de múltiplos pares `item + sala destino`
+- permissão para `ADMIN`/`ADMIN_CICLO`
+- justificativa obrigatória quando há sala lacrada
+- histórico nas salas origem/destino via `ItemHistorico`
+- SSE e recomputação de contadores
+- tela `/dashboard/movimentacoes`
+- menu administrativo colapsável no dashboard com `Movimentações`, `Acompanhamento`, `Auditoria`, `Usuários`, `Dados`, `Backups` e `Relatório de Eventos`
+
+### Fase 18: Acervo Bibliográfico, Busca por Código de Barras e Modo Leitura
+
+Implementado em [backend/src/routes/item.routes.js](backend/src/routes/item.routes.js), [backend/prisma/schema.prisma](backend/prisma/schema.prisma), [backend/prisma/migrations/20260616170000_partial_patrimonio_unique_for_books/migration.sql](backend/prisma/migrations/20260616170000_partial_patrimonio_unique_for_books/migration.sql), [backend/scripts/seed-xlsx.js](backend/scripts/seed-xlsx.js), [backend/scripts/seed-books-xlsx.js](backend/scripts/seed-books-xlsx.js), [frontend/src/app/room/[spaceId]/page.js](frontend/src/app/room/[spaceId]/page.js) e [frontend/src/components/ScanningModal/ScanningModeModal.jsx](frontend/src/components/ScanningModal/ScanningModeModal.jsx).
+
+Inclui:
+
+- importação de livros por cabeçalho de XLSX
+- `exemplar`/`codigoBarras` como chave principal do acervo
+- suporte a livros sem patrimônio
+- índice parcial para preservar patrimônio único em itens comuns sem `codigo_barras`
+- busca manual por patrimônio, código de barras, RFID, descrição e autores
+- exibição de código de barras/RFID nos resultados
+- estado visual claro de “Item não encontrado” no modo leitura, mantendo foco para nova tentativa
+
+Validação específica no arquivo `kellyra_2026-06-12-17-19-44.xlsx`:
+
+- `10.336` linhas totais
+- `10.336` linhas processáveis pela nova regra
+- `0` linhas puladas por falta de identificador
+- `10.336` códigos de barras/exemplares únicos
+- `5.309` registros com patrimônio
+- `5.027` registros sem patrimônio
+
+## Validações automatizadas recentes
+
+- `DATABASE_URL=postgresql://user:pass@localhost:5432/db ./backend/node_modules/.bin/prisma validate --schema backend/prisma/schema.prisma`: passou.
+- `node --test` no backend: passou.
+- `./node_modules/.bin/next build` no frontend: passou.
 
 ## Pendências confirmadas
 
