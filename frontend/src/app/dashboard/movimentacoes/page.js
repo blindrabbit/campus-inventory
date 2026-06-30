@@ -228,6 +228,7 @@ export default function PlannedMovementsPage() {
   const filteredSpaces = useMemo(() => {
     const term = normalizeText(spaceSearch);
     return spaces
+      .filter((space) => space.isActive !== false)
       .filter((space) => {
         if (!term) return true;
         return (

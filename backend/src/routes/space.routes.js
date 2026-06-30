@@ -103,10 +103,12 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
   try {
     const q = req.query.q?.toString().trim();
     const includeFinalized = req.query.includeFinalized === "true";
+    const canSeeInactive =
+      req.user?.role === "ADMIN" || req.inventoryRole === "ADMIN_CICLO";
 
     const where = {
       inventoryId: req.inventoryId,
-      isActive: true,
+      ...(canSeeInactive ? {} : { isActive: true }),
       ...(includeFinalized ? {} : { isFinalized: false }),
     };
 
@@ -115,11 +117,7 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
       include: {
         _count: {
           select: {
-            items: {
-              where: {
-                statusEncontrado: { not: "NAO" },
-              },
-            },
+            items: true,
           },
         },
         verificationRolls: {
@@ -180,6 +178,7 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
           unit: s.unit,
           observacoes: s.observacoes || null,
           itemCount: s._count.items,
+          isActive: s.isActive,
           isFinalized: s.isFinalized,
           isVerifiedByRevisor: s.isVerifiedByRevisor,
           isVerified: s.verificationRolls.length > 0,
@@ -196,7 +195,11 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
         };
       })
       .sort((a, b) =>
-        a.name.localeCompare(b.name, "pt-BR", { sensitivity: "base" }),
+        a.isActive === b.isActive
+          ? a.name.localeCompare(b.name, "pt-BR", { sensitivity: "base" })
+          : a.isActive
+            ? -1
+            : 1,
       )
       .slice(0, q ? 10 : undefined);
 
@@ -345,6 +348,28 @@ async function deleteSpaceHandler(req, res) {
   }
 }
 
+async function reactivateSpaceHandler(req, res) {
+  try {
+    const { id } = req.params;
+
+    const result = await prisma.space.updateMany({
+      where: { id, inventoryId: req.inventoryId },
+      data: { isActive: true },
+    });
+
+    if (result.count === 0) {
+      return res.status(404).json({ error: "Espaço não encontrado" });
+    }
+
+    const space = await prisma.space.findUnique({ where: { id } });
+
+    res.json({ success: true, space });
+  } catch (err) {
+    console.error("Error reactivating space:", err);
+    res.status(500).json({ error: "Erro ao reativar espaço" });
+  }
+}
+
 router.post(
   "/admin",
   verifyJWT,
@@ -456,7 +481,7 @@ router.delete(
   verifyJWT,
   requireInventoryAccess(),
   requireInventoryWriteAccess(),
-  requireRole("ADMIN"),
+  requireInventoryRoles("ADMIN_CICLO"),
   deleteSpaceHandler,
 );
 router.delete(
@@ -464,8 +489,24 @@ router.delete(
   verifyJWT,
   requireInventoryAccess(),
   requireInventoryWriteAccess(),
-  requireRole("ADMIN"),
+  requireInventoryRoles("ADMIN_CICLO"),
   deleteSpaceHandler,
+);
+router.post(
+  "/admin/:id/reactivate",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryRoles("ADMIN_CICLO"),
+  reactivateSpaceHandler,
+);
+router.post(
+  "/admin/spaces/:id/reactivate",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryRoles("ADMIN_CICLO"),
+  reactivateSpaceHandler,
 );
 
 // ========================================

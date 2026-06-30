@@ -40,7 +40,7 @@ router.get(
     try {
       const { fromSpaceId, conferente, action, fromDate, toDate } = req.query;
       const page = Math.max(Number(req.query.page || 1), 1);
-      const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+      const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 1000);
 
       const items = await prisma.item.findMany({
         where: {
@@ -133,6 +133,8 @@ router.get(
             ultimoResponsavel: nameMap[conferenteSam] || conferenteSam || null,
             ultimoLocalConhecido: item.space?.name || null,
             ultimoLocalConhecidoId: item.spaceId,
+            dataAquisicao: item.dataAquisicao,
+            valor: item.valor,
             conferente: nameMap[conferenteSam] || conferenteSam || null,
             historicoLocalizacoes: item.history.map((h) => formatHistoryEntry(h, nameMap)),
           };

@@ -278,7 +278,7 @@ router.post(
       }
 
       const targetSpace = await prisma.space.findFirst({
-        where: { id: targetSpaceId, inventoryId: req.inventoryId },
+        where: { id: targetSpaceId, inventoryId: req.inventoryId, isActive: true },
         select: { id: true, name: true, isFinalized: true },
       });
 

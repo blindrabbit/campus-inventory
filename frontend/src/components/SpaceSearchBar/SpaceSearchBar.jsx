@@ -24,6 +24,13 @@ export default function SpaceSearchBar({
   const [isLoading, setIsLoading] = useState(false);
 
   const getExecutionBadge = (space) => {
+    if (space.isActive === false) {
+      return {
+        label: "DESATIVADO",
+        className: "bg-zinc-200 text-zinc-700",
+      };
+    }
+
     const wasStarted =
       Boolean(space.startedAt) ||
       space.executionStatus === "INICIADO" ||
@@ -144,6 +151,7 @@ export default function SpaceSearchBar({
   }, [activeIndex, results]);
 
   const handleSelect = (space) => {
+    if (space.isActive === false) return;
     setQuery(space.name);
     setIsOpen(false);
     setResults([]);
@@ -208,6 +216,7 @@ export default function SpaceSearchBar({
           <div className="max-h-80 overflow-auto p-2">
             {results.map((space, index) => {
               const executionBadge = getExecutionBadge(space);
+              const isDeactivated = space.isActive === false;
               return (
                 <button
                   key={space.id}
@@ -215,12 +224,16 @@ export default function SpaceSearchBar({
                   onClick={() => handleSelect(space)}
                   onMouseEnter={() => setActiveIndex(index)}
                   className={`flex w-full items-start justify-between gap-4 rounded-xl px-4 py-3 text-left transition ${
-                    index === activeIndex ? "bg-sky-50" : "hover:bg-slate-50"
+                    isDeactivated
+                      ? "cursor-default bg-zinc-50 text-zinc-500"
+                      : index === activeIndex
+                        ? "bg-sky-50"
+                        : "hover:bg-slate-50"
                   }`}
                 >
                   <div className="min-w-0">
-                    <p className="truncate font-semibold text-slate-900">
-                      {space.name}
+                    <p className={`truncate font-semibold ${isDeactivated ? "text-zinc-700" : "text-slate-900"}`}>
+                      {isDeactivated ? `DESATIVADO - ${space.name}` : space.name}
                     </p>
                     <p className="mt-1 truncate text-xs text-slate-500">
                       {space.responsibleDisplay ||

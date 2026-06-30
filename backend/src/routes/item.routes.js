@@ -423,6 +423,21 @@ router.get("/", verifyJWT, requireInventoryAccess(), async (req, res) => {
     if (!spaceId)
       return res.status(400).json({ error: "spaceId é obrigatório" });
 
+    const space = await prisma.space.findFirst({
+      where: {
+        id: spaceId,
+        inventoryId: req.inventoryId,
+        ...(req.user?.role === "ADMIN" || req.inventoryRole === "ADMIN_CICLO"
+          ? {}
+          : { isActive: true }),
+      },
+      select: { id: true },
+    });
+
+    if (!space) {
+      return res.status(404).json({ error: "Espaço não encontrado" });
+    }
+
     const items = await prisma.item.findMany({
       where: {
         inventoryId: req.inventoryId,
@@ -710,7 +725,7 @@ router.post(
       }
 
       const targetSpace = await prisma.space.findFirst({
-        where: { id: targetSpaceId, inventoryId: req.inventoryId },
+        where: { id: targetSpaceId, inventoryId: req.inventoryId, isActive: true },
         select: { id: true, name: true, isFinalized: true },
       });
 
@@ -1202,7 +1217,7 @@ router.post(
 
       const [targetSpace, items] = await Promise.all([
         prisma.space.findFirst({
-          where: { id: targetSpaceId, inventoryId: req.inventoryId },
+          where: { id: targetSpaceId, inventoryId: req.inventoryId, isActive: true },
           select: { id: true, name: true, isFinalized: true },
         }),
         prisma.item.findMany({
@@ -2027,7 +2042,7 @@ router.post(
           select: { id: true, name: true, isFinalized: true },
         }),
         prisma.space.findFirst({
-          where: { id: targetSpaceId, inventoryId: req.inventoryId },
+          where: { id: targetSpaceId, inventoryId: req.inventoryId, isActive: true },
           select: { id: true, name: true, isFinalized: true },
         }),
       ]);
@@ -2472,7 +2487,7 @@ router.post(
         ]);
       } else if (action === "relocate") {
         const targetSpace = await prisma.space.findFirst({
-          where: { id: targetSpaceId, inventoryId: req.inventoryId },
+          where: { id: targetSpaceId, inventoryId: req.inventoryId, isActive: true },
           select: { id: true, name: true, isFinalized: true },
         });
         if (!targetSpace || targetSpace.isFinalized) {

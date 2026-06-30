@@ -464,7 +464,7 @@ export default function RoomPage() {
   }, [relocateSearchInput]);
 
   const filteredRelocationSpaces = useMemo(() => {
-    const candidates = spaces.filter((s) => s.id !== spaceId);
+    const candidates = spaces.filter((s) => s.id !== spaceId && s.isActive !== false);
     const filtered = !relocateSearchTerm
       ? candidates
       : candidates.filter((candidate) => {
@@ -697,6 +697,15 @@ export default function RoomPage() {
       setSpaces(spacesRes.data);
       setItems(itemsRes.data);
       const currentSpace = spacesRes.data.find((s) => s.id === spaceId);
+      if (!currentSpace || currentSpace.isActive === false) {
+        showToast({
+          type: "warning",
+          title: "Espaço indisponível",
+          message: "Este espaço está desativado ou não está visível para seu perfil.",
+        });
+        router.push("/dashboard");
+        return;
+      }
       setSpace(currentSpace);
       setObservacoesText(currentSpace?.observacoes || "");
       setObservacoesHasChanges(false);
@@ -2421,7 +2430,7 @@ export default function RoomPage() {
                       {batchSpaceDropdownOpen && (
                         <div className="absolute z-20 w-full bg-white border border-slate-200 rounded-lg shadow-lg mt-1 max-h-52 overflow-auto">
                           {spaces
-                            .filter((s) => s.id !== spaceId)
+                            .filter((s) => s.id !== spaceId && s.isActive !== false)
                             .filter(
                               (s) =>
                                 batchSpaceSearch === "" ||
@@ -2460,7 +2469,7 @@ export default function RoomPage() {
                               </button>
                             ))}
                           {spaces
-                            .filter((s) => s.id !== spaceId)
+                            .filter((s) => s.id !== spaceId && s.isActive !== false)
                             .filter(
                               (s) =>
                                 batchSpaceSearch !== "" &&
@@ -2468,7 +2477,7 @@ export default function RoomPage() {
                                   .toLowerCase()
                                   .includes(batchSpaceSearch.toLowerCase()),
                             ).length ===
-                            spaces.filter((s) => s.id !== spaceId).length && (
+                            spaces.filter((s) => s.id !== spaceId && s.isActive !== false).length && (
                             <p className="px-3 py-2.5 text-sm text-slate-400">
                               Nenhuma sala encontrada
                             </p>
@@ -2814,10 +2823,18 @@ export default function RoomPage() {
                       </div>
                     </div>
 
-                    {/* Expanded individual items */}
-                    {isExpanded && (
+                    {/* Expanded individual items (or verification items always visible) */}
+                    {(isExpanded || row.items.some((i) => i.verificationStatus === "REVERIFICAR" || verificationItems?.includes(i.id))) && (
                       <div className="border-t px-4 pb-4 pt-3 space-y-3">
-                        {row.items.map((item) => {
+                        {!isExpanded && (
+                          <div className="flex items-center gap-2 pb-1">
+                            <span className="text-xs font-semibold text-purple-700">🔍 Reverificação pendente</span>
+                            <span className="text-xs text-purple-500">— expanda o grupo para ver todos os itens</span>
+                          </div>
+                        )}
+                        {row.items
+                          .filter((i) => isExpanded || i.verificationStatus === "REVERIFICAR" || verificationItems?.includes(i.id))
+                          .map((item) => {
                           const formattedValue =
                             item.valor != null
                               ? `R$ ${Number(item.valor).toFixed(2)}`
@@ -2852,7 +2869,10 @@ export default function RoomPage() {
                               }
                               style={
                                 exitingItems[item.id]
-                                  ? { animation: `item-exit-${exitingItems[item.id]} 0.34s ease forwards`, pointerEvents: "none" }
+                                  ? {
+                                      animation: `item-exit-${exitingItems[item.id]} 0.34s ease forwards`,
+                                      pointerEvents: "none",
+                                    }
                                   : undefined
                               }
                               className={`relative rounded-lg border-l-4 transition-all select-none ${
@@ -2866,13 +2886,15 @@ export default function RoomPage() {
                                   : item.verificationStatus === "REVERIFICAR" ||
                                       verificationItems?.includes(item.id)
                                     ? "border-purple-500 bg-purple-50"
-                                    : item.isDuplicateSuspect
-                                      ? "border-orange-500 bg-orange-50"
-                                      : item.meta?.isRelocated
-                                        ? "border-yellow-500 bg-yellow-50"
-                                        : item.statusEncontrado === "SIM"
-                                          ? "border-green-500 bg-green-50"
-                                          : "border-gray-300 bg-gray-50"
+                                    : item.meta?.isDuplicateMirror
+                                      ? "border-pink-500 bg-pink-50"
+                                      : item.isDuplicateSuspect
+                                        ? "border-orange-500 bg-orange-50"
+                                        : item.meta?.isRelocated
+                                          ? "border-yellow-500 bg-yellow-50"
+                                          : item.statusEncontrado === "SIM"
+                                            ? "border-green-500 bg-green-50"
+                                            : "border-gray-300 bg-gray-50"
                               }`}
                             >
                               {selectionMode && (
@@ -2929,6 +2951,11 @@ export default function RoomPage() {
                                           ⚠️ Duplicata suspeita
                                         </span>
                                       )}
+                                      {item.meta?.isDuplicateMirror && (
+                                        <span className="px-2 py-0.5 bg-pink-200 text-pink-800 text-xs rounded font-medium">
+                                          🔍 Duplicada de {item.meta?.originalSpaceName || "outra sala"}
+                                        </span>
+                                      )}
                                       {item.statusEncontrado === "SIM" &&
                                         !item.verificationStatus && (
                                           <span className="text-green-600 text-sm">
@@ -2936,7 +2963,9 @@ export default function RoomPage() {
                                           </span>
                                         )}
                                     </div>
-                                    <p className={`text-gray-600 text-xs ${expandedItem === item.id ? "" : "line-clamp-2"}`}>
+                                    <p
+                                      className={`text-gray-600 text-xs ${expandedItem === item.id ? "" : "line-clamp-2"}`}
+                                    >
                                       {item.descricao}
                                     </p>
                                   </div>
@@ -2945,229 +2974,172 @@ export default function RoomPage() {
                                     {!selectionMode &&
                                       (item.verificationStatus ===
                                         "REVERIFICAR" ||
-                                      verificationItems?.includes(item.id)
-                                        ? ["REVISOR", "ADMIN_CICLO"].includes(
-                                            inventoryRole,
-                                          )
-                                          ? (
-                                            <>
-                                              <button
-                                                disabled={saving}
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  handleVerifyCheck(
-                                                    item.id,
-                                                    "SIM",
-                                                  );
-                                                }}
-                                                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-purple-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-purple-700 transition disabled:opacity-50"
-                                              >
-                                                <span className="hidden md:inline">
-                                                  ✅ Está aqui
-                                                </span>
-                                                <span className="md:hidden">
-                                                  ✅ Aqui
-                                                </span>
-                                              </button>
-                                              <button
-                                                disabled={saving}
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  handleVerifyCheck(
-                                                    item.id,
-                                                    "NAO",
-                                                  );
-                                                }}
-                                                className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition disabled:opacity-50"
-                                              >
-                                                <span className="hidden md:inline">
-                                                  ❌ Não está aqui
-                                                </span>
-                                                <span className="md:hidden">
-                                                  ❌ N.Aqui
-                                                </span>
-                                              </button>
-                                            </>
-                                          )
-                                          : null
-                                        : item.statusEncontrado === "SIM"
-                                          ? (!isViewer ? (
-                                            item.isDuplicateSuspect ? (
-                                              <button
-                                                onClick={(e) => { e.stopPropagation(); handleDismissDuplicate(item); }}
-                                                className="px-2 py-2 bg-orange-100 text-orange-700 rounded md:rounded-lg text-xs font-medium hover:bg-orange-200 transition shrink-0"
-                                                title="Remover sinalização de duplicata"
-                                              >✕ Dup.</button>
-                                            ) : (
-                                              <button
-                                                onClick={(e) => { e.stopPropagation(); setFlagDuplicateModal(item); setFlagDuplicateNotes(""); }}
-                                                className="px-2 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded md:rounded-lg text-xs font-medium hover:bg-orange-100 transition shrink-0"
-                                                title="Sinalizar como duplicata suspeita"
-                                              >⚠️ Dup.</button>
-                                            )
-                                          ) : null)
-                                          : item.verificationStatus ===
-                                              "NAO_LOCALIZADO_VERIFICACAO"
-                                            ? (
-                                              <span className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-medium">
-                                                ⚠️ Aguardando conferente
+                                      verificationItems?.includes(item.id) ? (
+                                        ["REVISOR", "ADMIN_CICLO"].includes(
+                                          inventoryRole,
+                                        ) ? (
+                                          <>
+                                            <button
+                                              disabled={saving}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleVerifyCheck(
+                                                  item.id,
+                                                  "SIM",
+                                                );
+                                              }}
+                                              className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-purple-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-purple-700 transition disabled:opacity-50"
+                                            >
+                                              <span className="hidden md:inline">
+                                                ✅ Está aqui
                                               </span>
-                                            )
-                                            : !isViewer
-                                              ? (
-                                              <>
-                                                <button
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    handleCheck(
-                                                      item.id,
-                                                      item.condicaoVisual ||
-                                                        "BOM",
-                                                    );
-                                                  }}
-                                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-green-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-green-700 transition"
-                                                >
-                                                  <span className="hidden md:inline">
-                                                    ✅ Encontrado
-                                                  </span>
-                                                  <span className="md:hidden">
-                                                    ✅ Enc.
-                                                  </span>
-                                                </button>
-                                                {!space?.isFinalized && (
-                                                  <button
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      setRelocateModal(item);
-                                                    }}
-                                                    className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 transition"
-                                                  >
-                                                    <span className="hidden md:inline">
-                                                      ➡️ Mover
-                                                    </span>
-                                                    <span className="md:hidden">
-                                                      ➡️ Mov.
-                                                    </span>
-                                                  </button>
-                                                )}
-                                                <button
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    setPendingUnfoundItem(item);
-                                                  }}
-                                                  className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition"
-                                                >
-                                                  <span className="hidden md:inline">
-                                                    🚫 Não localizado
-                                                  </span>
-                                                  <span className="md:hidden">
-                                                    🚫 N.Loc
-                                                  </span>
-                                                </button>
-                                                {item.isDuplicateSuspect ? (
-                                                  <button
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      handleDismissDuplicate(item);
-                                                    }}
-                                                    className="px-2 py-2 bg-orange-100 text-orange-700 rounded md:rounded-lg text-xs font-medium hover:bg-orange-200 transition shrink-0"
-                                                    title="Remover sinalização de duplicata"
-                                                  >
-                                                    ✕ Dup.
-                                                  </button>
-                                                ) : (
-                                                  <button
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      setFlagDuplicateModal(item);
-                                                      setFlagDuplicateNotes("");
-                                                    }}
-                                                    className="px-2 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded md:rounded-lg text-xs font-medium hover:bg-orange-100 transition shrink-0"
-                                                    title="Sinalizar como duplicata suspeita"
-                                                  >
-                                                    ⚠️ Dup.
-                                                  </button>
-                                                )}
-                                              </>
-                                            ) : null)}
+                                              <span className="md:hidden">
+                                                ✅ Aqui
+                                              </span>
+                                            </button>
+                                            <button
+                                              disabled={saving}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleVerifyCheck(
+                                                  item.id,
+                                                  "NAO",
+                                                );
+                                              }}
+                                              className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition disabled:opacity-50"
+                                            >
+                                              <span className="hidden md:inline">
+                                                ❌ Não está aqui
+                                              </span>
+                                              <span className="md:hidden">
+                                                ❌ N.Aqui
+                                              </span>
+                                            </button>
+                                          </>
+                                        ) : null
+                                      ) : item.statusEncontrado === "SIM" ? null
+                                      : item.verificationStatus ===
+                                        "NAO_LOCALIZADO_VERIFICACAO" ? (
+                                        <span className="px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-medium">
+                                          ⚠️ Aguardando conferente
+                                        </span>
+                                      ) : !isViewer ? (
+                                        <>
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleCheck(
+                                                item.id,
+                                                item.condicaoVisual || "BOM",
+                                              );
+                                            }}
+                                            className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-green-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-green-700 transition"
+                                          >
+                                            <span className="hidden md:inline">
+                                              ✅ Encontrado
+                                            </span>
+                                            <span className="md:hidden">
+                                              ✅ Enc.
+                                            </span>
+                                          </button>
+                                          {!space?.isFinalized && (
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setRelocateModal(item);
+                                              }}
+                                              className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-blue-600 text-white rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-blue-700 transition"
+                                            >
+                                              <span className="hidden md:inline">
+                                                ➡️ Mover
+                                              </span>
+                                              <span className="md:hidden">
+                                                ➡️ Mov.
+                                              </span>
+                                            </button>
+                                          )}
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setPendingUnfoundItem(item);
+                                            }}
+                                            className="flex-1 px-3 md:px-4 py-2 md:py-2.5 bg-red-100 text-red-700 rounded md:rounded-lg text-sm md:text-base font-medium hover:bg-red-200 transition"
+                                          >
+                                            <span className="hidden md:inline">
+                                              🚫 Não localizado
+                                            </span>
+                                            <span className="md:hidden">
+                                              🚫 N.Loc
+                                            </span>
+                                          </button>
+                                        </>
+                                      ) : null)}
                                   </div>
                                 </div>
                               </div>
 
                               {/* Inner expanded details */}
                               {expandedItem === item.id && (
-                                <div className="px-4 pb-4 border-t pt-3">
-                                  <div className="space-y-1.5 mb-4 text-sm text-gray-700">
+                                <div className="px-4 pb-4 border-t pt-4">
+                                  {/* Decorative triangle */}
+                                  <div className="mb-3 text-blue-500 text-lg">▲</div>
+
+                                  {/* Main info section */}
+                                  <div className="space-y-2 mb-4 text-sm text-gray-700">
                                     <p>
-                                      <span className="font-semibold">
-                                        Valor:
-                                      </span>{" "}
-                                      {formattedValue} |{" "}
-                                      <span className="font-semibold">
-                                        Condição Original:
-                                      </span>{" "}
-                                      {item.condicaoOriginal || "N/A"}
+                                      <span className="font-semibold">Valor:</span> {formattedValue}{" "}
+                                      <span className="text-gray-500 mx-2">|</span>{" "}
+                                      <span className="font-semibold">Condição Original:</span> {item.condicaoOriginal || "N/A"}
                                     </p>
                                     <p>
-                                      <span className="font-semibold">
-                                        Código SIA:
-                                      </span>{" "}
-                                      {item.codigoSIA || "N/A"} |{" "}
-                                      <span className="font-semibold">
-                                        Fornecedor:
-                                      </span>{" "}
-                                      {item.fornecedor || "N/A"}
+                                      <span className="font-semibold">Código SIA:</span> {item.codigoSIA || "N/A"}{" "}
+                                      <span className="text-gray-500 mx-2">|</span>{" "}
+                                      <span className="font-semibold">Fornecedor:</span> {item.fornecedor || "N/A"}
+                                    </p>
+                                    <p>
+                                      <span className="font-semibold">Data Aquisição:</span> {formattedDataAquisicao}{" "}
+                                      <span className="text-gray-500 mx-2">|</span>{" "}
+                                      <span className="font-semibold">Documento:</span> {item.documento || "N/A"}
                                     </p>
                                     {(item.codigoBarras || item.codigoRFID || item.autores) && (
                                       <p>
                                         {item.codigoBarras && (
                                           <>
-                                            <span className="font-semibold">Cód. Barras:</span>{" "}
-                                            {item.codigoBarras}
+                                            <span className="font-semibold">Cód. Barras:</span> {item.codigoBarras}
                                             {(item.codigoRFID || item.autores) && " | "}
                                           </>
                                         )}
                                         {item.codigoRFID && (
                                           <>
-                                            <span className="font-semibold">RFID:</span>{" "}
-                                            {item.codigoRFID}
+                                            <span className="font-semibold">RFID:</span> {item.codigoRFID}
                                             {item.autores && " | "}
                                           </>
                                         )}
                                         {item.autores && (
                                           <>
-                                            <span className="font-semibold">Autores:</span>{" "}
-                                            {item.autores}
+                                            <span className="font-semibold">Autores:</span> {item.autores}
                                             {item.anoPublicacao && ` (${item.anoPublicacao})`}
                                           </>
                                         )}
                                       </p>
                                     )}
-                                    <p>
-                                      <span className="font-semibold">
-                                        Data Aquisição:
-                                      </span>{" "}
-                                      {formattedDataAquisicao} |{" "}
-                                      <span className="font-semibold">
-                                        Documento:
-                                      </span>{" "}
-                                      {item.documento || "N/A"}
-                                    </p>
                                   </div>
 
+                                  {/* State of conservation section */}
                                   {!isViewer && (
-                                  <div>
-                                    <p className="mb-2 text-sm font-semibold text-gray-800">
-                                      🎨 Estado de Conservação:
-                                    </p>
-                                    <div className="flex flex-wrap gap-2 mb-4">
-                                      {[["BOM", "🟢 Bom"], ["REGULAR", "🟡 Regular"], ["RUIM", "🔴 Ruim"]].map(
-                                        ([status, label]) => (
+                                    <div className="mb-4">
+                                      <p className="mb-2 text-sm font-semibold text-gray-800 flex items-center gap-2">
+                                        🎨 Estado de Conservação:
+                                      </p>
+                                      <div className="flex flex-wrap gap-2">
+                                        {[
+                                          ["BOM", "🟢 Bom"],
+                                          ["REGULAR", "🟡 Regular"],
+                                          ["RUIM", "🔴 Ruim"],
+                                        ].map(([status, label]) => (
                                           <button
                                             key={status}
-                                            onClick={() =>
-                                              handleCheck(item.id, status)
-                                            }
+                                            onClick={() => handleCheck(item.id, status)}
                                             className={`py-1.5 px-3 rounded-lg text-sm font-medium transition ${
                                               item.condicaoVisual === status
                                                 ? "bg-blue-600 text-white"
@@ -3176,20 +3148,42 @@ export default function RoomPage() {
                                           >
                                             {label}
                                           </button>
-                                        ),
-                                      )}
+                                        ))}
+                                      </div>
                                     </div>
-                                  </div>
                                   )}
 
+                                  {/* Actions section */}
                                   {!isViewer && (
-                                  <button
-                                    onClick={() => handleUndoLastAction(item)}
-                                    disabled={saving || !canUndoAction}
-                                    className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                                  >
-                                    ↩️ Desfazer
-                                  </button>
+                                    <div className="border-t pt-3">
+                                      <p className="mb-2 text-sm font-semibold text-gray-800 flex items-center gap-2">
+                                        ✨ Ações:
+                                      </p>
+                                      <div className="flex flex-wrap gap-2">
+                                        <button
+                                          onClick={() => handleUndoLastAction(item)}
+                                          disabled={saving || !canUndoAction}
+                                          className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 flex items-center gap-1"
+                                        >
+                                          ↩ Desfazer
+                                        </button>
+                                        {item.isDuplicateSuspect ? (
+                                          <button
+                                            onClick={() => handleDismissDuplicate(item)}
+                                            className="px-3 py-2 bg-orange-100 text-orange-700 rounded-lg text-sm font-medium hover:bg-orange-200 transition flex items-center gap-1"
+                                          >
+                                            ✕ Dup.
+                                          </button>
+                                        ) : (
+                                          <button
+                                            onClick={() => { setFlagDuplicateModal(item); setFlagDuplicateNotes(""); }}
+                                            className="px-3 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded-lg text-sm font-medium hover:bg-orange-100 transition flex items-center gap-1"
+                                          >
+                                            ⚠️ Dup.
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
                                   )}
                                 </div>
                               )}
@@ -3376,21 +3370,7 @@ export default function RoomPage() {
                             )
                             : null
                           : item.statusEncontrado === "SIM"
-                            ? (!isViewer ? (
-                              item.isDuplicateSuspect ? (
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleDismissDuplicate(item); }}
-                                  className="px-2 py-2 bg-orange-100 text-orange-700 rounded md:rounded-lg text-xs font-medium hover:bg-orange-200 transition shrink-0"
-                                  title="Remover sinalização de duplicata"
-                                >✕ Dup.</button>
-                              ) : (
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setFlagDuplicateModal(item); setFlagDuplicateNotes(""); }}
-                                  className="px-2 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded md:rounded-lg text-xs font-medium hover:bg-orange-100 transition shrink-0"
-                                  title="Sinalizar como duplicata suspeita"
-                                >⚠️ Dup.</button>
-                              )
-                            ) : null)
+                            ? null
                             : item.verificationStatus ===
                                 "NAO_LOCALIZADO_VERIFICACAO"
                               ? (
@@ -3442,30 +3422,6 @@ export default function RoomPage() {
                                     </span>
                                     <span className="md:hidden">🚫 N.Loc</span>
                                   </button>
-                                  {item.isDuplicateSuspect ? (
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleDismissDuplicate(item);
-                                      }}
-                                      className="px-2 py-2 bg-orange-100 text-orange-700 rounded md:rounded-lg text-xs font-medium hover:bg-orange-200 transition shrink-0"
-                                      title="Remover sinalização de duplicata"
-                                    >
-                                      ✕ Dup.
-                                    </button>
-                                  ) : (
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setFlagDuplicateModal(item);
-                                        setFlagDuplicateNotes("");
-                                      }}
-                                      className="px-2 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded md:rounded-lg text-xs font-medium hover:bg-orange-100 transition shrink-0"
-                                      title="Sinalizar como duplicata suspeita"
-                                    >
-                                      ⚠️ Dup.
-                                    </button>
-                                  )}
                                 </>
                               ) : null)}
                     </div>
@@ -3475,65 +3431,87 @@ export default function RoomPage() {
                 {/* Expandido */}
                 {expandedItem === item.id && (
                   <div className="px-5 pb-5 border-t pt-4">
+                    {/* Decorative triangle */}
+                    <div className="mb-3 text-blue-500 text-lg">▲</div>
+
+                    {/* Main info section */}
                     <div className="space-y-2 mb-5 text-sm text-gray-700">
                       <p>
-                        <span className="font-semibold">Valor:</span>{" "}
-                        {formattedValue} |{" "}
-                        <span className="font-semibold">
-                          Condição Original:
-                        </span>{" "}
-                        {item.condicaoOriginal || "N/A"}
+                        <span className="font-semibold">Valor:</span> {formattedValue}{" "}
+                        <span className="text-gray-500 mx-2">|</span>{" "}
+                        <span className="font-semibold">Condição Original:</span> {item.condicaoOriginal || "N/A"}
                       </p>
                       <p>
-                        <span className="font-semibold">Código SIA:</span>{" "}
-                        {item.codigoSIA || "N/A"} |{" "}
-                        <span className="font-semibold">Fornecedor:</span>{" "}
-                        {item.fornecedor || "N/A"}
+                        <span className="font-semibold">Código SIA:</span> {item.codigoSIA || "N/A"}{" "}
+                        <span className="text-gray-500 mx-2">|</span>{" "}
+                        <span className="font-semibold">Fornecedor:</span> {item.fornecedor || "N/A"}
                       </p>
                       <p>
-                        <span className="font-semibold">Data Aquisição:</span>{" "}
-                        {formattedDataAquisicao} |{" "}
-                        <span className="font-semibold">Documento:</span>{" "}
-                        {item.documento || "N/A"}
+                        <span className="font-semibold">Data Aquisição:</span> {formattedDataAquisicao}{" "}
+                        <span className="text-gray-500 mx-2">|</span>{" "}
+                        <span className="font-semibold">Documento:</span> {item.documento || "N/A"}
                       </p>
                     </div>
 
+                    {/* State of conservation section */}
                     {!isViewer && (
-                    <div>
-                      <p className="mb-2 text-sm font-semibold text-gray-800">
-                        🎨 Estado de Conservação:
-                      </p>
-                      <div className="flex flex-wrap gap-3 mb-5">
-                        {[["BOM", "🟢 Bom"], ["REGULAR", "🟡 Regular"], ["RUIM", "🔴 Ruim"]].map(([status, label]) => (
-                          <button
-                            key={status}
-                            onClick={() => handleCheck(item.id, status)}
-                            className={`py-2 px-4 rounded-lg font-medium transition ${
-                              item.condicaoVisual === status
-                                ? "bg-blue-600 text-white"
-                                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                            }`}
-                          >
-                            {label}
-                          </button>
-                        ))}
+                      <div className="mb-4">
+                        <p className="mb-2 text-sm font-semibold text-gray-800 flex items-center gap-2">
+                          🎨 Estado de Conservação:
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {[
+                            ["BOM", "🟢 Bom"],
+                            ["REGULAR", "🟡 Regular"],
+                            ["RUIM", "🔴 Ruim"],
+                          ].map(([status, label]) => (
+                            <button
+                              key={status}
+                              onClick={() => handleCheck(item.id, status)}
+                              className={`py-1.5 px-3 rounded-lg text-sm font-medium transition ${
+                                item.condicaoVisual === status
+                                  ? "bg-blue-600 text-white"
+                                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                    </div>
                     )}
 
+                    {/* Actions section */}
                     {!isViewer && (
-                    <div>
-                      <p className="mb-2 text-sm font-semibold text-gray-800">
-                        ⚙️ Ações:
-                      </p>
-                      <button
-                        onClick={() => handleUndoLastAction(item)}
-                        disabled={saving || !canUndoAction}
-                        className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        ↩️ Desfazer
-                      </button>
-                    </div>
+                      <div className="border-t pt-3">
+                        <p className="mb-2 text-sm font-semibold text-gray-800 flex items-center gap-2">
+                          ✨ Ações:
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => handleUndoLastAction(item)}
+                            disabled={saving || !canUndoAction}
+                            className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 flex items-center gap-1"
+                          >
+                            ↩ Desfazer
+                          </button>
+                          {item.isDuplicateSuspect ? (
+                            <button
+                              onClick={() => handleDismissDuplicate(item)}
+                              className="px-3 py-2 bg-orange-100 text-orange-700 rounded-lg text-sm font-medium hover:bg-orange-200 transition flex items-center gap-1"
+                            >
+                              ✕ Dup.
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => { setFlagDuplicateModal(item); setFlagDuplicateNotes(""); }}
+                              className="px-3 py-2 bg-orange-50 text-orange-600 border border-orange-200 rounded-lg text-sm font-medium hover:bg-orange-100 transition flex items-center gap-1"
+                            >
+                              ⚠️ Dup.
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}
@@ -4032,7 +4010,7 @@ export default function RoomPage() {
               {multiMoveSpaceDropdownOpen && (
                 <div className="absolute z-10 w-full bg-white border border-slate-200 rounded-xl shadow-lg mt-1 max-h-52 overflow-auto">
                   {spaces
-                    .filter((s) => s.id !== spaceId)
+                    .filter((s) => s.id !== spaceId && s.isActive !== false)
                     .filter(
                       (s) =>
                         multiMoveSpaceSearch === "" ||
@@ -4072,12 +4050,13 @@ export default function RoomPage() {
                   {spaces.filter(
                     (s) =>
                       s.id !== spaceId &&
+                      s.isActive !== false &&
                       multiMoveSpaceSearch !== "" &&
                       !s.name
                         .toLowerCase()
                         .includes(multiMoveSpaceSearch.toLowerCase()),
                   ).length ===
-                    spaces.filter((s) => s.id !== spaceId).length && (
+                    spaces.filter((s) => s.id !== spaceId && s.isActive !== false).length && (
                     <p className="px-4 py-2.5 text-sm text-slate-400">
                       Nenhuma sala encontrada
                     </p>

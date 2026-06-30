@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import axios from "axios";
 import { useToast } from "../../components/Toast/toastContext";
@@ -43,8 +43,14 @@ const STATUS_BADGE_STYLES = {
 };
 
 // Fase visual do card de espaço (determina cor e ordem de exibição)
-const SPACE_PHASE_ORDER = { NAO_INICIADO: 0, INICIADO: 1, FINALIZADO: 2, CONFERIDO: 3 };
+const SPACE_PHASE_ORDER = { NAO_INICIADO: 0, INICIADO: 1, FINALIZADO: 2, CONFERIDO: 3, DESATIVADO: 4 };
 const SPACE_PHASE_STYLES = {
+  DESATIVADO: {
+    card: "border-zinc-300 bg-zinc-100 opacity-85",
+    title: "text-zinc-700",
+    arrow: "text-zinc-500",
+    footerBorder: "border-zinc-200",
+  },
   NAO_INICIADO: {
     card: "border-gray-100 bg-white",
     title: "group-hover:text-blue-600",
@@ -89,6 +95,350 @@ const DASHBOARD_TABS = [
   },
 ];
 const ADMIN_MENU_TAB_IDS = ["usuarios", "dados", "backups"];
+const UNFOUND_TABLE_COLUMNS = [
+  { key: "patrimonio", label: "N patrimonio", align: "left" },
+  { key: "descricao", label: "Descrição", align: "left" },
+  { key: "localAnterior", label: "Onde ele estava", align: "left" },
+  { key: "dataAquisicao", label: "Data de aquisição", align: "left" },
+  { key: "valor", label: "Valor do bem", align: "right" },
+];
+
+const HISTORY_ACTION_LABELS = {
+  ENCONTRADO: "Encontrado",
+  NAO_LOCALIZADO: "Não localizado",
+  DESFEITO_NAO_LOCALIZADO: "Não localizado desfeito",
+  REALOCADO: "Realocado",
+  ESTORNADO: "Estornado",
+  VERIFICADO: "Verificado",
+  NAO_LOCALIZADO_VERIFICACAO: "Não localizado na verificação",
+};
+
+function normalizeComparableText(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function getUnfoundInitialOrigin(item) {
+  const history = Array.isArray(item?.historicoLocalizacoes)
+    ? [...item.historicoLocalizacoes].sort(
+        (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
+      )
+    : [];
+  const firstOrigin = history.find((entry) => entry.fromSpaceName)?.fromSpaceName;
+
+  return (
+    firstOrigin ||
+    item?.marcadoOnde ||
+    item?.ultimoLocalConhecido ||
+    item?.space?.name ||
+    ""
+  );
+}
+
+function getUnfoundSortValue(item, key) {
+  if (key === "localAnterior") {
+    return getUnfoundInitialOrigin(item);
+  }
+
+  if (key === "dataAquisicao") {
+    return item.dataAquisicao ? new Date(item.dataAquisicao).getTime() : null;
+  }
+
+  if (key === "valor") {
+    return typeof item.valor === "number" ? item.valor : null;
+  }
+
+  return item[key] ?? "";
+}
+
+function compareNullableValues(aValue, bValue, direction) {
+  const aEmpty = aValue === null || aValue === undefined || aValue === "";
+  const bEmpty = bValue === null || bValue === undefined || bValue === "";
+
+  if (aEmpty && bEmpty) return 0;
+  if (aEmpty) return 1;
+  if (bEmpty) return -1;
+
+  const multiplier = direction === "desc" ? -1 : 1;
+
+  if (typeof aValue === "number" && typeof bValue === "number") {
+    return (aValue - bValue) * multiplier;
+  }
+
+  return (
+    String(aValue).localeCompare(String(bValue), "pt-BR", {
+      numeric: true,
+      sensitivity: "base",
+    }) * multiplier
+  );
+}
+
+function formatCurrencyValue(value) {
+  if (typeof value !== "number") return "-";
+  return value.toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+}
+
+function formatHistoryAction(action) {
+  return HISTORY_ACTION_LABELS[action] || action || "Movimentação";
+}
+
+function UnfoundItemsTable({
+  items,
+  sorts,
+  onSort,
+  expandedItems,
+  onToggleItem,
+  onMoveItem,
+  abbreviateName,
+  fmtDate,
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-slate-200">
+      <div className="overflow-x-auto">
+        <table className="min-w-full table-fixed divide-y divide-slate-200 text-sm">
+          <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <tr>
+              {UNFOUND_TABLE_COLUMNS.map((column) => {
+                const sortIndex = sorts.findIndex((rule) => rule.key === column.key);
+                const isActive = sortIndex !== -1;
+                return (
+                  <th
+                    key={column.key}
+                    className={`px-4 py-3 ${
+                      column.align === "right" ? "text-right" : "text-left"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={(event) =>
+                        onSort(
+                          column.key,
+                          event.shiftKey || event.ctrlKey || event.metaKey,
+                        )
+                      }
+                      title="Clique para ordenar. Shift, Ctrl ou Cmd adiciona ordenação em grupo."
+                      className={`inline-flex max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition hover:bg-slate-200 ${
+                        isActive ? "text-slate-900" : "text-slate-500"
+                      }`}
+                    >
+                      <span className="truncate">{column.label}</span>
+                      <span className="shrink-0 text-[11px]">
+                        {isActive
+                          ? `${sorts[sortIndex].direction === "asc" ? "↑" : "↓"}${
+                              sorts.length > 1 ? sortIndex + 1 : ""
+                            }`
+                          : "↕"}
+                      </span>
+                    </button>
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 bg-white">
+            {items.map((item) => {
+              const isExpanded = !!expandedItems[item.id];
+              const localAnterior = getUnfoundInitialOrigin(item) || "-";
+              const history = Array.isArray(item.historicoLocalizacoes)
+                ? [...item.historicoLocalizacoes].sort(
+                    (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+                  )
+                : [];
+
+              return (
+                <Fragment key={item.id}>
+                  <tr key={item.id} className="align-top hover:bg-slate-50">
+                    <td className="px-4 py-3 font-semibold text-slate-900">
+                      <button
+                        type="button"
+                        onClick={() => onToggleItem(item.id)}
+                        className="inline-flex items-center gap-2 rounded text-left hover:text-blue-700"
+                        aria-expanded={isExpanded}
+                      >
+                        <span>{isExpanded ? "▲" : "▼"}</span>
+                        <span>#{item.patrimonio || "-"}</span>
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">
+                      <p className="line-clamp-2">{item.descricao || "-"}</p>
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">{localAnterior}</td>
+                    <td className="px-4 py-3 text-slate-700">
+                      {fmtDate(item.dataAquisicao)}
+                    </td>
+                    <td className="px-4 py-3 text-right font-medium text-slate-800">
+                      {formatCurrencyValue(item.valor)}
+                    </td>
+                  </tr>
+                  {isExpanded ? (
+                    <tr className="bg-slate-50">
+                      <td colSpan={UNFOUND_TABLE_COLUMNS.length} className="px-4 py-4">
+                        <div className="grid gap-3 text-sm md:grid-cols-4">
+                          <div>
+                            <p className="text-xs font-medium uppercase text-slate-500">
+                              Marcado por
+                            </p>
+                            <p className="mt-1 text-slate-900">
+                              {item.marcadoPorQuem && item.marcadoPorQuem !== "-"
+                                ? abbreviateName(item.marcadoPorQuem)
+                                : "-"}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium uppercase text-slate-500">
+                              Marcado em
+                            </p>
+                            <p className="mt-1 text-slate-900">
+                              {item.marcadoEm
+                                ? new Date(item.marcadoEm).toLocaleString("pt-BR")
+                                : "-"}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium uppercase text-slate-500">
+                              Condição visual
+                            </p>
+                            <p className="mt-1 text-slate-900">
+                              {item.condicaoVisual || "-"}
+                            </p>
+                          </div>
+                          <div className="flex items-end md:justify-end">
+                            <button
+                              type="button"
+                              onClick={() => onMoveItem(item)}
+                              className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-blue-700"
+                            >
+                              Mover para outra sala
+                            </button>
+                          </div>
+                        </div>
+                        <div className="mt-4 border-t border-slate-200 pt-4">
+                          <p className="text-xs font-medium uppercase text-slate-500">
+                            Histórico de movimentações neste inventário
+                          </p>
+                          {history.length === 0 ? (
+                            <p className="mt-2 text-sm text-slate-500">
+                              Nenhuma movimentação registrada para este item.
+                            </p>
+                          ) : (
+                            <div className="mt-3 max-h-72 overflow-auto rounded-lg border border-slate-200 bg-white">
+                              <table className="min-w-full text-left text-xs">
+                                <thead className="sticky top-0 bg-slate-50 text-slate-500">
+                                  <tr>
+                                    <th className="px-3 py-2 font-semibold">Data/Hora</th>
+                                    <th className="px-3 py-2 font-semibold">Ação</th>
+                                    <th className="px-3 py-2 font-semibold">De</th>
+                                    <th className="px-3 py-2 font-semibold">Para</th>
+                                    <th className="px-3 py-2 font-semibold">Responsável</th>
+                                    <th className="px-3 py-2 font-semibold">Justificativa</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                  {history.map((entry) => (
+                                    <tr key={entry.id}>
+                                      <td className="px-3 py-2 text-slate-600">
+                                        {entry.createdAt
+                                          ? new Date(entry.createdAt).toLocaleString("pt-BR")
+                                          : "-"}
+                                      </td>
+                                      <td className="px-3 py-2 font-medium text-slate-800">
+                                        {formatHistoryAction(entry.action)}
+                                      </td>
+                                      <td className="px-3 py-2 text-slate-600">
+                                        {entry.fromSpaceName || "-"}
+                                      </td>
+                                      <td className="px-3 py-2 text-slate-600">
+                                        {entry.toSpaceName || "-"}
+                                      </td>
+                                      <td className="px-3 py-2 text-slate-600">
+                                        {entry.createdBy || "-"}
+                                      </td>
+                                      <td className="px-3 py-2 text-slate-500">
+                                        {entry.reason || "-"}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function DupItemCard({ item, onResolve }) {
+  const statusLabel = item.statusEncontrado === "SIM"
+    ? "Encontrado"
+    : item.statusEncontrado === "NAO"
+      ? "Não localizado"
+      : "Pendente";
+  const statusClass = item.statusEncontrado === "SIM"
+    ? "bg-green-100 text-green-700"
+    : item.statusEncontrado === "NAO"
+      ? "bg-red-100 text-red-700"
+      : "bg-amber-100 text-amber-700";
+
+  return (
+    <div className="rounded-xl border-l-4 border-orange-400 bg-orange-50 p-4 flex flex-col sm:flex-row sm:items-start gap-4">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap mb-1">
+          <span className="font-bold text-slate-800">#{item.patrimonio || "—"}</span>
+          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusClass}`}>
+            {statusLabel}
+          </span>
+          {item.space?.isFinalized && (
+            <span className="text-xs px-2 py-0.5 bg-slate-200 text-slate-700 rounded-full font-medium">
+              🔒 Sala lacrada
+            </span>
+          )}
+        </div>
+        <p className="text-sm text-slate-700 truncate">{item.descricao}</p>
+        <p className="text-xs text-slate-500 mt-0.5">
+          Sala: <span className="font-medium">{item.space?.name || "—"}</span>
+          {item.itemGroup && (
+            <> · Grupo: <span className="font-medium">{item.itemGroup.name}</span></>
+          )}
+        </p>
+        {item.duplicateNotes && (
+          <p className="mt-2 text-xs text-orange-800 bg-orange-100 rounded px-2 py-1 italic">
+            "{item.duplicateNotes}"
+          </p>
+        )}
+      </div>
+      <div className="flex gap-2 shrink-0">
+        <button
+          type="button"
+          onClick={() => onResolve(item, "dismiss")}
+          className="px-3 py-1.5 text-xs rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium"
+        >
+          ✓ Dispensar
+        </button>
+        <button
+          type="button"
+          onClick={() => onResolve(item, "confirm")}
+          className="px-3 py-1.5 text-xs rounded-lg bg-red-600 text-white hover:bg-red-700 font-medium"
+        >
+          🗑 Confirmar duplicata
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const [spaces, setSpaces] = useState([]);
@@ -167,6 +517,20 @@ export default function DashboardPage() {
   const [dashboardSummaryLoading, setDashboardSummaryLoading] = useState(false);
   const [dashboardSummaryError, setDashboardSummaryError] = useState("");
   const [dashboardSummaryDenied, setDashboardSummaryDenied] = useState(false);
+
+  // Filtros / agrupamento — Não Localizados
+  const [unfoundSearch, setUnfoundSearch] = useState("");
+  const [unfoundFilterRoom, setUnfoundFilterRoom] = useState("");
+  const [unfoundGroupByRoom, setUnfoundGroupByRoom] = useState(false);
+  const [unfoundSorts, setUnfoundSorts] = useState([
+    { key: "patrimonio", direction: "asc" },
+  ]);
+
+  // Filtros / agrupamento — Duplicatas
+  const [dupSearch, setDupSearch] = useState("");
+  const [dupFilterRoom, setDupFilterRoom] = useState("");
+  const [dupFilterStatus, setDupFilterStatus] = useState("");
+  const [dupGroupByRoom, setDupGroupByRoom] = useState(false);
 
   // Backup state
   const [backupInventories, setBackupInventories] = useState([]); // inventories the user can manage backups for
@@ -334,6 +698,7 @@ export default function DashboardPage() {
   }, [user, activeInventory]);
 
   const getSpacePhase = (space) => {
+    if (space.isActive === false) return "DESATIVADO";
     if (space.isVerified && space.confirmedBy) return "CONFERIDO";
     if (space.isFinalized || space.executionStatus === "FINALIZADO") return "FINALIZADO";
     if (space.startedAt || space.executionStatus === "INICIADO") return "INICIADO";
@@ -516,6 +881,15 @@ export default function DashboardPage() {
 
   const getSpacePhaseBadges = (space) => {
     const badges = [];
+
+    if (space.isActive === false) {
+      return [
+        {
+          label: "DESATIVADO",
+          className: "bg-zinc-200 text-zinc-700",
+        },
+      ];
+    }
 
     if (space.startedAt || space.executionStatus === "INICIADO" || space.executionStatus === "FINALIZADO") {
       const date = space.startedAt ? new Date(space.startedAt).toLocaleDateString("pt-BR") : "--/--/--";
@@ -1559,6 +1933,179 @@ export default function DashboardPage() {
     }
   };
 
+  const handleDeactivateSpace = async (space) => {
+    if (!space?.id || space.itemCount > 0) return;
+
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+
+    try {
+      await axios.delete(`${API}/spaces/admin/spaces/${space.id}`, {
+        data: { inventoryId },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      showToast({
+        type: "success",
+        title: "Espaço desativado",
+        message: "O espaço ficará invisível para usuários não administradores.",
+      });
+      await loadSpaces(token, inventoryId);
+    } catch (error) {
+      showToast({
+        type: "error",
+        title: "Falha ao desativar",
+        message:
+          error.response?.data?.error || "Não foi possível desativar o espaço.",
+      });
+    }
+  };
+
+  const handleReactivateSpace = async (space) => {
+    if (!space?.id) return;
+
+    const token = localStorage.getItem("token");
+    const inventoryId = localStorage.getItem("activeInventoryId");
+
+    try {
+      await axios.post(
+        `${API}/spaces/admin/spaces/${space.id}/reactivate`,
+        { inventoryId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      showToast({
+        type: "success",
+        title: "Espaço reativado",
+        message: "O espaço voltou a ficar visível para os usuários.",
+      });
+      await loadSpaces(token, inventoryId);
+    } catch (error) {
+      showToast({
+        type: "error",
+        title: "Falha ao reativar",
+        message:
+          error.response?.data?.error || "Não foi possível reativar o espaço.",
+      });
+    }
+  };
+
+  // ── Não Localizados: filtros + agrupamento ──────────────────────────────
+  // Usa marcadoOnde (sala onde foi declarado não localizado) como referência de local
+  const unfoundRooms = useMemo(() => {
+    const seen = new Set();
+    for (const i of unfoundItems) {
+      const name = getUnfoundInitialOrigin(i) || "Sem sala";
+      seen.add(name);
+    }
+    return Array.from(seen).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [unfoundItems]);
+
+  const filteredUnfoundItems = useMemo(() => {
+    let list = unfoundItems;
+    if (unfoundSearch.trim()) {
+      const q = normalizeComparableText(unfoundSearch.trim());
+      list = list.filter((i) => {
+        const p = normalizeComparableText(i.patrimonio);
+        const d = normalizeComparableText(i.descricao);
+        const s = normalizeComparableText(getUnfoundInitialOrigin(i));
+        return p.includes(q) || d.includes(q) || s.includes(q);
+      });
+    }
+    if (unfoundFilterRoom) {
+      list = list.filter((i) => (getUnfoundInitialOrigin(i) || "Sem sala") === unfoundFilterRoom);
+    }
+    return list;
+  }, [unfoundItems, unfoundSearch, unfoundFilterRoom]);
+
+  const sortedUnfoundItems = useMemo(() => {
+    const sortRules =
+      unfoundSorts.length > 0
+        ? unfoundSorts
+        : [{ key: "patrimonio", direction: "asc" }];
+
+    return [...filteredUnfoundItems].sort((a, b) => {
+      for (const rule of sortRules) {
+        const result = compareNullableValues(
+          getUnfoundSortValue(a, rule.key),
+          getUnfoundSortValue(b, rule.key),
+          rule.direction,
+        );
+        if (result !== 0) return result;
+      }
+
+      return compareNullableValues(
+        getUnfoundSortValue(a, "patrimonio"),
+        getUnfoundSortValue(b, "patrimonio"),
+        "asc",
+      );
+    });
+  }, [filteredUnfoundItems, unfoundSorts]);
+
+  const handleUnfoundSort = (key, grouped = false) => {
+    setUnfoundSorts((current) => {
+      const existing = current.find((rule) => rule.key === key);
+      const nextRule = {
+        key,
+        direction: existing?.direction === "asc" ? "desc" : "asc",
+      };
+
+      if (!grouped) return [nextRule];
+
+      return [nextRule, ...current.filter((rule) => rule.key !== key)];
+    });
+  };
+
+  const unfoundGrouped = useMemo(() => {
+    if (!unfoundGroupByRoom) return null;
+    const groups = {};
+    for (const item of sortedUnfoundItems) {
+      const key = getUnfoundInitialOrigin(item) || "Localização não informada";
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(item);
+    }
+    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b, "pt-BR"));
+  }, [sortedUnfoundItems, unfoundGroupByRoom]);
+
+  // ── Duplicatas: filtros + agrupamento ───────────────────────────────────
+  const dupRooms = useMemo(() => {
+    const seen = new Set();
+    for (const i of duplicateItems) {
+      const name = i.space?.name || "Sem sala";
+      seen.add(name);
+    }
+    return Array.from(seen).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [duplicateItems]);
+
+  const filteredDupItems = useMemo(() => {
+    let list = duplicateItems;
+    if (dupSearch.trim()) {
+      const q = dupSearch.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+      list = list.filter((i) => {
+        const p = (i.patrimonio || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+        const d = (i.descricao || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+        const s = (i.space?.name || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+        return p.includes(q) || d.includes(q) || s.includes(q);
+      });
+    }
+    if (dupFilterRoom) {
+      list = list.filter((i) => (i.space?.name || "Sem sala") === dupFilterRoom);
+    }
+    if (dupFilterStatus) {
+      list = list.filter((i) => i.statusEncontrado === dupFilterStatus);
+    }
+    return list;
+  }, [duplicateItems, dupSearch, dupFilterRoom, dupFilterStatus]);
+
+  const dupGrouped = useMemo(() => {
+    if (!dupGroupByRoom) return null;
+    const groups = {};
+    for (const item of filteredDupItems) {
+      const key = item.space?.name || "Localização não informada";
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(item);
+    }
+    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b, "pt-BR"));
+  }, [filteredDupItems, dupGroupByRoom]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -1980,19 +2527,29 @@ export default function DashboardPage() {
               const phaseBadges = getSpacePhaseBadges(space);
               const phase = getSpacePhase(space);
               const phaseStyle = SPACE_PHASE_STYLES[phase];
+              const isDeactivated = space.isActive === false;
+              const displaySpaceName = isDeactivated
+                ? `DESATIVADO - ${space.name}`
+                : space.name;
               return (
                 <div
                   key={space.id}
                   role="button"
                   tabIndex={0}
-                  onClick={() => router.push(`/room/${space.id}`)}
+                  onClick={() => {
+                    if (!isDeactivated) router.push(`/room/${space.id}`);
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
-                      router.push(`/room/${space.id}`);
+                      if (!isDeactivated) router.push(`/room/${space.id}`);
                     }
                   }}
-                  className={`group relative block cursor-pointer overflow-hidden rounded-xl border shadow-md transition-all duration-300 hover:shadow-xl ${phaseStyle.card}`}
+                  className={`group relative block overflow-hidden rounded-xl border shadow-md transition-all duration-300 ${
+                    isDeactivated
+                      ? "cursor-default"
+                      : "cursor-pointer hover:shadow-xl"
+                  } ${phaseStyle.card}`}
                 >
                   {canManageSpaces ? (
                     <button
@@ -2002,7 +2559,7 @@ export default function DashboardPage() {
                         openEditSpaceModal(space);
                       }}
                       className="absolute left-3 top-3 z-10 rounded-full bg-white/95 px-3 py-2 text-sm font-semibold text-slate-700 opacity-0 shadow-md transition hover:bg-slate-50 group-hover:opacity-100"
-                      aria-label={`Editar espaço ${space.name}`}
+                      aria-label={`Editar espaço ${displaySpaceName}`}
                       title="Editar nome"
                     >
                       ✏️
@@ -2011,7 +2568,7 @@ export default function DashboardPage() {
                   <div className="p-6">
                     <div className="flex justify-between items-start mb-4">
                       <h3 className={`font-bold text-lg text-gray-900 transition line-clamp-2 ${phaseStyle.title}`}>
-                        {space.name}
+                        {displaySpaceName}
                       </h3>
                       <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
                         {space.itemCount}{" "}
@@ -2039,27 +2596,63 @@ export default function DashboardPage() {
                       </div>
                     </div>
 
-                    <div className={`flex items-center justify-between pt-4 border-t ${phaseStyle.footerBorder}`}>
-                      <span className="text-sm text-gray-500">
-                        Clique para conferir
-                      </span>
-                      <span className={`inline-flex items-center font-medium group-hover:translate-x-1 transition-transform ${phaseStyle.arrow}`}>
-                        {space.isFinalized ? "Visualizar" : "Iniciar"}
-                        <svg
-                          className="w-4 h-4 ml-1"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M9 5l7 7-7 7"
-                          />
-                        </svg>
-                      </span>
+                    <div className={`flex items-center justify-between gap-3 pt-4 border-t ${phaseStyle.footerBorder}`}>
+                      {isDeactivated ? (
+                        <>
+                          <span className="text-sm text-zinc-500">
+                            Invisível para usuários
+                          </span>
+                          {isInventoryAdmin ? (
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleReactivateSpace(space);
+                              }}
+                              className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700"
+                            >
+                              Reativar
+                            </button>
+                          ) : null}
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-sm text-gray-500">
+                            Clique para conferir
+                          </span>
+                          <span className={`inline-flex items-center font-medium group-hover:translate-x-1 transition-transform ${phaseStyle.arrow}`}>
+                            {space.isFinalized ? "Visualizar" : "Iniciar"}
+                            <svg
+                              className="w-4 h-4 ml-1"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M9 5l7 7-7 7"
+                              />
+                            </svg>
+                          </span>
+                        </>
+                      )}
                     </div>
+                    {isInventoryAdmin && !isDeactivated && space.itemCount === 0 ? (
+                      <div className="mt-3 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeactivateSpace(space);
+                          }}
+                          className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-sm font-semibold text-rose-700 hover:bg-rose-100"
+                        >
+                          Desativar espaço vazio
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -2508,7 +3101,8 @@ export default function DashboardPage() {
           </section>
         ) : activeTab === "duplicatas" ? (
           <section className="mt-10 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-            <div className="mb-5 flex items-center justify-between">
+            {/* Header */}
+            <div className="mb-4 flex items-center justify-between">
               <div>
                 <h2 className="text-base font-semibold text-slate-800">⚠️ Duplicatas suspeitas</h2>
                 <p className="mt-1 text-xs text-slate-500">
@@ -2524,6 +3118,62 @@ export default function DashboardPage() {
               </button>
             </div>
 
+            {/* Filtros */}
+            {!duplicatesLoading && duplicateItems.length > 0 && (
+              <div className="mb-4 flex flex-wrap gap-2 items-center">
+                <input
+                  type="text"
+                  value={dupSearch}
+                  onChange={(e) => setDupSearch(e.target.value)}
+                  placeholder="Buscar patrimônio, descrição ou sala…"
+                  className="flex-1 min-w-[180px] rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+                />
+                <select
+                  value={dupFilterRoom}
+                  onChange={(e) => setDupFilterRoom(e.target.value)}
+                  className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-slate-700"
+                >
+                  <option value="">Todas as salas</option>
+                  {dupRooms.map((r) => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
+                </select>
+                <select
+                  value={dupFilterStatus}
+                  onChange={(e) => setDupFilterStatus(e.target.value)}
+                  className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-slate-700"
+                >
+                  <option value="">Todos os status</option>
+                  <option value="SIM">Encontrado</option>
+                  <option value="NAO">Não localizado</option>
+                  <option value="PENDENTE">Pendente</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setDupGroupByRoom((v) => !v)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
+                    dupGroupByRoom
+                      ? "bg-indigo-600 text-white border-indigo-600"
+                      : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                  }`}
+                >
+                  🗂 Agrupar por sala
+                </button>
+                {(dupSearch || dupFilterRoom || dupFilterStatus) && (
+                  <button
+                    type="button"
+                    onClick={() => { setDupSearch(""); setDupFilterRoom(""); setDupFilterStatus(""); }}
+                    className="text-xs px-2 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
+                  >
+                    ✕ Limpar filtros
+                  </button>
+                )}
+                <span className="text-xs text-slate-400 ml-auto">
+                  {filteredDupItems.length} de {duplicateItems.length} item{duplicateItems.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+            )}
+
             {duplicatesLoading ? (
               <p className="py-10 text-center text-sm text-slate-500 animate-pulse">Carregando…</p>
             ) : duplicateItems.length === 0 ? (
@@ -2531,63 +3181,32 @@ export default function DashboardPage() {
                 <p className="text-3xl mb-2">✅</p>
                 <p className="text-sm">Nenhuma duplicata suspeita no momento.</p>
               </div>
-            ) : (
-              <div className="space-y-3">
-                {duplicateItems.map((item) => (
-                  <div
-                    key={item.id}
-                    className="rounded-xl border-l-4 border-orange-400 bg-orange-50 p-4 flex flex-col sm:flex-row sm:items-start gap-4"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap mb-1">
-                        <span className="font-bold text-slate-800">
-                          #{item.patrimonio || "—"}
-                        </span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                          item.statusEncontrado === "SIM"
-                            ? "bg-green-100 text-green-700"
-                            : item.statusEncontrado === "NAO"
-                              ? "bg-red-100 text-red-700"
-                              : "bg-amber-100 text-amber-700"
-                        }`}>
-                          {item.statusEncontrado === "SIM" ? "Encontrado" : item.statusEncontrado === "NAO" ? "Não localizado" : "Pendente"}
-                        </span>
-                        {item.space?.isFinalized && (
-                          <span className="text-xs px-2 py-0.5 bg-slate-200 text-slate-700 rounded-full font-medium">
-                            🔒 Sala lacrada
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-sm text-slate-700 truncate">{item.descricao}</p>
-                      <p className="text-xs text-slate-500 mt-0.5">
-                        Sala: <span className="font-medium">{item.space?.name || "—"}</span>
-                        {item.itemGroup && (
-                          <> · Grupo: <span className="font-medium">{item.itemGroup.name}</span></>
-                        )}
-                      </p>
-                      {item.duplicateNotes && (
-                        <p className="mt-2 text-xs text-orange-800 bg-orange-100 rounded px-2 py-1 italic">
-                          "{item.duplicateNotes}"
-                        </p>
-                      )}
+            ) : filteredDupItems.length === 0 ? (
+              <div className="py-10 text-center text-slate-400">
+                <p className="text-sm">Nenhum item corresponde aos filtros selecionados.</p>
+              </div>
+            ) : dupGrouped ? (
+              <div className="space-y-4">
+                {dupGrouped.map(([roomName, roomItems]) => (
+                  <div key={roomName} className="rounded-xl border border-slate-200 overflow-hidden">
+                    <div className="bg-slate-50 px-4 py-2.5 flex items-center gap-2 border-b border-slate-200">
+                      <span className="font-semibold text-sm text-slate-800">📍 {roomName}</span>
+                      <span className="text-xs px-2 py-0.5 bg-orange-100 text-orange-700 rounded-full font-medium">
+                        {roomItems.length} item{roomItems.length !== 1 ? "s" : ""}
+                      </span>
                     </div>
-                    <div className="flex gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleResolveDuplicate(item, "dismiss")}
-                        className="px-3 py-1.5 text-xs rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium"
-                      >
-                        ✓ Dispensar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleResolveDuplicate(item, "confirm")}
-                        className="px-3 py-1.5 text-xs rounded-lg bg-red-600 text-white hover:bg-red-700 font-medium"
-                      >
-                        🗑 Confirmar duplicata
-                      </button>
+                    <div className="divide-y divide-slate-100">
+                      {roomItems.map((item) => (
+                        <DupItemCard key={item.id} item={item} onResolve={handleResolveDuplicate} />
+                      ))}
                     </div>
                   </div>
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {filteredDupItems.map((item) => (
+                  <DupItemCard key={item.id} item={item} onResolve={handleResolveDuplicate} />
                 ))}
               </div>
             )}
@@ -2634,6 +3253,52 @@ export default function DashboardPage() {
             {/* Sub-aba: Itens Não Localizados */}
             {unfoundSubTab === "itens" && (
               <div className="rounded-xl border border-slate-200 p-4">
+                {/* Filtros */}
+                {!unfoundLoading && unfoundItems.length > 0 && (
+                  <div className="mb-4 flex flex-wrap gap-2 items-center">
+                    <input
+                      type="text"
+                      value={unfoundSearch}
+                      onChange={(e) => setUnfoundSearch(e.target.value)}
+                      placeholder="Buscar patrimônio, descrição ou sala…"
+                      className="flex-1 min-w-[180px] rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+                    />
+                    <select
+                      value={unfoundFilterRoom}
+                      onChange={(e) => setUnfoundFilterRoom(e.target.value)}
+                      className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-slate-700"
+                    >
+                      <option value="">Todas as salas</option>
+                      {unfoundRooms.map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setUnfoundGroupByRoom((v) => !v)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
+                        unfoundGroupByRoom
+                          ? "bg-indigo-600 text-white border-indigo-600"
+                          : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                      }`}
+                    >
+                      🗂 Agrupar por sala
+                    </button>
+                    {(unfoundSearch || unfoundFilterRoom) && (
+                      <button
+                        type="button"
+                        onClick={() => { setUnfoundSearch(""); setUnfoundFilterRoom(""); }}
+                        className="text-xs px-2 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
+                      >
+                        ✕ Limpar filtros
+                      </button>
+                    )}
+                    <span className="text-xs text-slate-400 ml-auto">
+                      {filteredUnfoundItems.length} de {unfoundItems.length} item{unfoundItems.length !== 1 ? "s" : ""}
+                    </span>
+                  </div>
+                )}
+
                 {unfoundLoading ? (
                   <p className="py-8 text-center text-sm text-slate-600">
                     Carregando itens não localizados...
@@ -2645,106 +3310,44 @@ export default function DashboardPage() {
                       Todos os itens foram localizados!
                     </p>
                   </div>
-                ) : (
-                  <div className="space-y-2">
-                    {unfoundItems.map((item) => {
-                      const isExpanded = expandedUnfoundItems[item.id];
-                      return (
-                        <div
-                          key={item.id}
-                          className="rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100"
-                        >
-                          <button
-                            onClick={() =>
-                              setExpandedUnfoundItems((prev) => ({
-                                ...prev,
-                                [item.id]: !prev[item.id],
-                              }))
-                            }
-                            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
-                          >
-                            <div className="flex-1 min-w-0">
-                              <p className="font-semibold text-slate-900">
-                                #{item.patrimonio}
-                              </p>
-                              <p className="text-xs text-slate-600 truncate">
-                                {item.descricao}
-                              </p>
-                              <p className="text-xs text-slate-500 mt-1">
-                                📍 {item.space?.name || "Localização não informada"}
-                              </p>
-                              {item.marcadoPorQuem && item.marcadoPorQuem !== "-" && (
-                                <p className="text-xs text-rose-600 mt-0.5">
-                                  Não localizado por {abbreviateName(item.marcadoPorQuem)}
-                                  {item.marcadoOnde ? ` em ${item.marcadoOnde}` : ""}
-                                </p>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className="rounded-full px-2 py-0.5 text-xs font-semibold bg-rose-100 text-rose-700">
-                                Não Localizado
-                              </span>
-                              <span className="text-xs font-semibold text-slate-500">
-                                {isExpanded ? "▲" : "▼"}
-                              </span>
-                            </div>
-                          </button>
-
-                          {isExpanded && (
-                            <div className="border-t border-slate-200 bg-white p-3">
-                              <div className="space-y-3 text-sm">
-                                <div>
-                                  <p className="text-xs font-medium text-slate-500 uppercase">
-                                    Patrimônio
-                                  </p>
-                                  <p className="text-slate-900 font-medium">
-                                    {item.patrimonio}
-                                  </p>
-                                </div>
-                                <div>
-                                  <p className="text-xs font-medium text-slate-500 uppercase">
-                                    Descrição
-                                  </p>
-                                  <p className="text-slate-900">
-                                    {item.descricao}
-                                  </p>
-                                </div>
-                                <div>
-                                  <p className="text-xs font-medium text-slate-500 uppercase">
-                                    Condição Visual
-                                  </p>
-                                  <p className="text-slate-900">
-                                    {item.condicaoVisual}
-                                  </p>
-                                </div>
-                                <div>
-                                  <p className="text-xs font-medium text-slate-500 uppercase">
-                                    Localização Registrada
-                                  </p>
-                                  <p className="text-slate-900">
-                                    {item.space?.name || "Sem informação"}
-                                  </p>
-                                </div>
-                              </div>
-
-                              <div className="mt-4 pt-4 border-t border-slate-200">
-                                <button
-                                  onClick={() => {
-                                    setUnfoundCondicao("BOM");
-                                    setUnfoundMoveTargetSpaceId("");
-                                    setUnfoundActionModal({ item, action: "mover" });
-                                  }}
-                                  className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition"
-                                >
-                                  ➡️ Mover para outra sala
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                ) : filteredUnfoundItems.length === 0 ? (
+                  <div className="py-8 text-center text-slate-400">
+                    <p className="text-sm">Nenhum item corresponde aos filtros selecionados.</p>
                   </div>
+                ) : unfoundGrouped ? (
+                  <div className="space-y-4">
+                    {unfoundGrouped.map(([roomName, roomItems]) => (
+                      <div key={roomName} className="rounded-xl border border-slate-200 overflow-hidden">
+                        <div className="bg-slate-50 px-4 py-2.5 flex items-center gap-2 border-b border-slate-200">
+                          <span className="font-semibold text-sm text-slate-800">📍 {roomName}</span>
+                          <span className="text-xs px-2 py-0.5 bg-rose-100 text-rose-700 rounded-full font-medium">
+                            {roomItems.length} item{roomItems.length !== 1 ? "s" : ""}
+                          </span>
+                        </div>
+                        <UnfoundItemsTable
+                          items={roomItems}
+                          sorts={unfoundSorts}
+                          onSort={handleUnfoundSort}
+                          expandedItems={expandedUnfoundItems}
+                          onToggleItem={(itemId) => setExpandedUnfoundItems((prev) => ({ ...prev, [itemId]: !prev[itemId] }))}
+                          onMoveItem={(item) => { setUnfoundCondicao("BOM"); setUnfoundMoveTargetSpaceId(""); setUnfoundActionModal({ item, action: "mover" }); }}
+                          abbreviateName={abbreviateName}
+                          fmtDate={fmtDate}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <UnfoundItemsTable
+                    items={sortedUnfoundItems}
+                    sorts={unfoundSorts}
+                    onSort={handleUnfoundSort}
+                    expandedItems={expandedUnfoundItems}
+                    onToggleItem={(itemId) => setExpandedUnfoundItems((prev) => ({ ...prev, [itemId]: !prev[itemId] }))}
+                    onMoveItem={(item) => { setUnfoundCondicao("BOM"); setUnfoundMoveTargetSpaceId(""); setUnfoundActionModal({ item, action: "mover" }); }}
+                    abbreviateName={abbreviateName}
+                    fmtDate={fmtDate}
+                  />
                 )}
               </div>
             )}
@@ -3683,7 +4286,7 @@ export default function DashboardPage() {
               >
                 <option value="">Selecione uma sala...</option>
                 {spaces
-                  .filter((s) => !s.isFinalized)
+                  .filter((s) => s.isActive !== false && !s.isFinalized)
                   .map((s) => {
                     const isOrigin = s.id === unfoundActionModal?.item?.ultimoLocalConhecidoId;
                     return (
