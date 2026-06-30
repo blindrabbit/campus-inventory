@@ -140,6 +140,21 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
       : spaces.filter((space) =>
           normalizeString(space.name).includes(normalizeString(q)),
         );
+    const filteredSpaceIds = filtered.map((space) => space.id);
+    const visibleItemCounts = filteredSpaceIds.length
+      ? await prisma.item.groupBy({
+          by: ["spaceId"],
+          where: {
+            inventoryId: req.inventoryId,
+            spaceId: { in: filteredSpaceIds },
+            statusEncontrado: { not: "NAO" },
+          },
+          _count: { _all: true },
+        })
+      : [];
+    const visibleItemCountBySpaceId = new Map(
+      visibleItemCounts.map((row) => [row.spaceId, row._count._all]),
+    );
 
     const responsibleLabels = await buildResponsibleLabels(filtered);
 
@@ -177,7 +192,8 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
           sector: s.sector,
           unit: s.unit,
           observacoes: s.observacoes || null,
-          itemCount: s._count.items,
+          itemCount: visibleItemCountBySpaceId.get(s.id) || 0,
+          totalItemCount: s._count.items,
           isActive: s.isActive,
           isFinalized: s.isFinalized,
           isVerifiedByRevisor: s.isVerifiedByRevisor,

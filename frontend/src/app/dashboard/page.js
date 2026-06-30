@@ -466,6 +466,8 @@ export default function DashboardPage() {
   const [searchingUsers, setSearchingUsers] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
   const [newMemberRole, setNewMemberRole] = useState("CONFERENTE");
+  const [spaceItemCountMin, setSpaceItemCountMin] = useState("");
+  const [spaceItemCountMax, setSpaceItemCountMax] = useState("");
   const [allItems, setAllItems] = useState([]);
   const [loadingItems, setLoadingItems] = useState(false);
   const [groupedItems, setGroupedItems] = useState({});
@@ -714,6 +716,18 @@ export default function DashboardPage() {
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaces]);
+
+  const filteredSpacesByItemCount = useMemo(() => {
+    const min = spaceItemCountMin === "" ? null : Number(spaceItemCountMin);
+    const max = spaceItemCountMax === "" ? null : Number(spaceItemCountMax);
+
+    return sortedSpaces.filter((space) => {
+      const count = Number(space.itemCount || 0);
+      if (min !== null && count < min) return false;
+      if (max !== null && count > max) return false;
+      return true;
+    });
+  }, [sortedSpaces, spaceItemCountMin, spaceItemCountMax]);
 
   const fmtDate = (value) =>
     value ? new Date(value).toLocaleDateString("pt-BR") : "--/--/--";
@@ -2495,6 +2509,49 @@ export default function DashboardPage() {
           <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div className="w-full lg:max-w-2xl">
               <SpaceSearchBar placeholder="Buscar espaços por nome..." />
+              <div className="mt-3 flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                <div>
+                  <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">
+                    Itens mín.
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={spaceItemCountMin}
+                    onChange={(event) => setSpaceItemCountMin(event.target.value)}
+                    className="w-28 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    placeholder="0"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">
+                    Itens máx.
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={spaceItemCountMax}
+                    onChange={(event) => setSpaceItemCountMax(event.target.value)}
+                    className="w-28 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    placeholder="Todos"
+                  />
+                </div>
+                {(spaceItemCountMin || spaceItemCountMax) ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSpaceItemCountMin("");
+                      setSpaceItemCountMax("");
+                    }}
+                    className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                  >
+                    Limpar
+                  </button>
+                ) : null}
+                <span className="ml-auto text-xs text-slate-500">
+                  {filteredSpacesByItemCount.length} de {sortedSpaces.length} sala{sortedSpaces.length !== 1 ? "s" : ""}
+                </span>
+              </div>
             </div>
             {canManageSpaces ? (
               <div className="lg:flex lg:justify-end">
@@ -2511,19 +2568,19 @@ export default function DashboardPage() {
         ) : null}
 
 
-        {activeTab === "espacos" && sortedSpaces.length === 0 ? (
+        {activeTab === "espacos" && filteredSpacesByItemCount.length === 0 ? (
           <div className="bg-white rounded-xl shadow-md p-12 text-center">
             <div className="text-6xl mb-4">📦</div>
             <h3 className="text-xl font-semibold text-gray-800 mb-2">
               Nenhum espaço disponível
             </h3>
             <p className="text-gray-500">
-              Não há espaços ativos para conferência no momento.
+              Não há espaços que correspondam aos filtros selecionados.
             </p>
           </div>
         ) : activeTab === "espacos" ? (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {sortedSpaces.map((space) => {
+            {filteredSpacesByItemCount.map((space) => {
               const phaseBadges = getSpacePhaseBadges(space);
               const phase = getSpacePhase(space);
               const phaseStyle = SPACE_PHASE_STYLES[phase];
@@ -2575,6 +2632,12 @@ export default function DashboardPage() {
                         {space.itemCount === 1 ? "item" : "itens"}
                       </span>
                     </div>
+                    {isInventoryAdmin &&
+                    Number(space.totalItemCount || 0) > Number(space.itemCount || 0) ? (
+                      <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+                        {space.totalItemCount} registro{space.totalItemCount !== 1 ? "s" : ""} vinculado{space.totalItemCount !== 1 ? "s" : ""}; {space.itemCount} {space.itemCount === 1 ? "visível" : "visíveis"} na sala.
+                      </p>
+                    ) : null}
 
                     <div className="mb-4 flex flex-col gap-1">
                       {phaseBadges.map((badge, i) => (
@@ -2639,7 +2702,7 @@ export default function DashboardPage() {
                         </>
                       )}
                     </div>
-                    {isInventoryAdmin && !isDeactivated && space.itemCount === 0 ? (
+                    {isInventoryAdmin && !isDeactivated && (space.totalItemCount ?? space.itemCount) === 0 ? (
                       <div className="mt-3 flex justify-end">
                         <button
                           type="button"
