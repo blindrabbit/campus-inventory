@@ -117,6 +117,7 @@ const operations = [
     ],
     level0: "Limpe o campo, tente uma nova leitura e confira se o leitor enviou todos os números.",
     level1: "Testar busca manual por patrimônio, código de barras e RFID; se todos falharem, verificar cadastro/importação.",
+    note: "Números de patrimônio podem se repetir entre um item de acervo (identificado pelo código de barras) e um equipamento sem código de barras. O modo leitura só usa o patrimônio como identificador para itens que não possuem código de barras cadastrado — por isso ler o código de barras do livro nunca resolve o equipamento, e ler o patrimônio do equipamento nunca resolve o livro, mesmo que o número seja igual nos dois registros.",
   },
   {
     title: "Movimentar patrimônios",
@@ -386,6 +387,11 @@ export default function HelpPage() {
                     <strong>Nível 1:</strong> {operation.level1}
                   </div>
                 </div>
+                {operation.note ? (
+                  <div className="mt-3 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    <strong>Atenção:</strong> {operation.note}
+                  </div>
+                ) : null}
               </article>
             ))}
           </div>

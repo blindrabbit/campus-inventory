@@ -155,6 +155,22 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
     const visibleItemCountBySpaceId = new Map(
       visibleItemCounts.map((row) => [row.spaceId, row._count._all]),
     );
+    const itemStatusCounts = filteredSpaceIds.length
+      ? await prisma.item.groupBy({
+          by: ["spaceId", "statusEncontrado"],
+          where: {
+            inventoryId: req.inventoryId,
+            spaceId: { in: filteredSpaceIds },
+          },
+          _count: { _all: true },
+        })
+      : [];
+    const itemStatusCountBySpaceId = new Map();
+    for (const row of itemStatusCounts) {
+      const counts = itemStatusCountBySpaceId.get(row.spaceId) || {};
+      counts[row.statusEncontrado || ""] = row._count._all;
+      itemStatusCountBySpaceId.set(row.spaceId, counts);
+    }
 
     const responsibleLabels = await buildResponsibleLabels(filtered);
 
@@ -172,6 +188,9 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
         const confirmedEntry = s.finalizationHistory.find(
           (h) => h.action === "COMPLETED_VERIFICATION",
         );
+        const statusCounts = itemStatusCountBySpaceId.get(s.id) || {};
+        const foundItemCount = statusCounts.SIM || 0;
+        const unfoundItemCount = statusCounts.NAO || 0;
 
         return {
           executionStatus: s.isFinalized
@@ -194,6 +213,12 @@ router.get("/active", verifyJWT, requireInventoryAccess(), async (req, res) => {
           observacoes: s.observacoes || null,
           itemCount: visibleItemCountBySpaceId.get(s.id) || 0,
           totalItemCount: s._count.items,
+          foundItemCount,
+          unfoundItemCount,
+          pendingItemCount: Math.max(
+            s._count.items - foundItemCount - unfoundItemCount,
+            0,
+          ),
           isActive: s.isActive,
           isFinalized: s.isFinalized,
           isVerifiedByRevisor: s.isVerifiedByRevisor,
@@ -337,12 +362,16 @@ async function deleteSpaceHandler(req, res) {
   try {
     const { id } = req.params;
 
-    const itemCount = await prisma.item.count({
-      where: { spaceId: id, inventoryId: req.inventoryId },
+    const visibleItemCount = await prisma.item.count({
+      where: {
+        spaceId: id,
+        inventoryId: req.inventoryId,
+        statusEncontrado: { not: "NAO" },
+      },
     });
-    if (itemCount > 0) {
+    if (visibleItemCount > 0) {
       return res.status(400).json({
-        error: "Só é possível desativar um espaço sem itens vinculados",
+        error: "Só é possível desativar um espaço sem itens ativos/visíveis",
       });
     }
 
@@ -432,6 +461,36 @@ router.get(
         s.finalizationHistory.map((h) => h.actedBy),
       );
       const actorNames = await resolveUserNames(allActors);
+      const visibleItemCounts = spaces.length
+        ? await prisma.item.groupBy({
+            by: ["spaceId"],
+            where: {
+              inventoryId: req.inventoryId,
+              spaceId: { in: spaces.map((space) => space.id) },
+              statusEncontrado: { not: "NAO" },
+            },
+            _count: { _all: true },
+          })
+        : [];
+      const visibleItemCountBySpaceId = new Map(
+        visibleItemCounts.map((row) => [row.spaceId, row._count._all]),
+      );
+      const itemStatusCounts = spaces.length
+        ? await prisma.item.groupBy({
+            by: ["spaceId", "statusEncontrado"],
+            where: {
+              inventoryId: req.inventoryId,
+              spaceId: { in: spaces.map((space) => space.id) },
+            },
+            _count: { _all: true },
+          })
+        : [];
+      const itemStatusCountBySpaceId = new Map();
+      for (const row of itemStatusCounts) {
+        const counts = itemStatusCountBySpaceId.get(row.spaceId) || {};
+        counts[row.statusEncontrado || ""] = row._count._all;
+        itemStatusCountBySpaceId.set(row.spaceId, counts);
+      }
 
       res.json(
         spaces.map((space) => {
@@ -441,6 +500,9 @@ router.get(
           const confirmedEntry = space.finalizationHistory.find(
             (h) => h.action === "COMPLETED_VERIFICATION",
           );
+          const statusCounts = itemStatusCountBySpaceId.get(space.id) || {};
+          const foundItemCount = statusCounts.SIM || 0;
+          const unfoundItemCount = statusCounts.NAO || 0;
           return {
             id: space.id,
             name: space.name,
@@ -458,7 +520,14 @@ router.get(
             isFinalized: space.isFinalized,
             isVerifiedByRevisor: space.isVerifiedByRevisor,
             isVerified: space.verificationRolls.length > 0,
-            itemCount: space._count.items,
+            itemCount: visibleItemCountBySpaceId.get(space.id) || 0,
+            totalItemCount: space._count.items,
+            foundItemCount,
+            unfoundItemCount,
+            pendingItemCount: Math.max(
+              space._count.items - foundItemCount - unfoundItemCount,
+              0,
+            ),
             finalizedAt: finalizedEntry?.actedAt || null,
             finalizedBy: finalizedEntry
               ? (actorNames.get(finalizedEntry.actedBy) || finalizedEntry.actedBy)

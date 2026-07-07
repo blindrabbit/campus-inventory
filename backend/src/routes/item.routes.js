@@ -2792,15 +2792,20 @@ router.get(
       // Tentamos a versão exata e a versão sem zeros em todos os três campos identificadores.
       const stripped = normalized.replace(/^0+/, "") || normalized;
 
+      // Patrimônio só é usado como identificador de leitura quando o item não tem
+      // código de barras — mesma regra do índice único do banco. Isso evita que a
+      // leitura de um patrimônio colida com o campo `patrimonio` de outro item que
+      // já é identificado pelo próprio código de barras (ex: acervo importado que
+      // reaproveita o mesmo número de patrimônio de um equipamento pré-existente).
       const orClauses = [
         { codigoBarras: normalized },
         { codigoRFID:   normalized },
-        { patrimonio:   normalized },
+        { patrimonio: normalized, codigoBarras: null },
       ];
       if (stripped !== normalized) {
         orClauses.push({ codigoBarras: stripped });
         orClauses.push({ codigoRFID:   stripped });
-        orClauses.push({ patrimonio:   stripped });
+        orClauses.push({ patrimonio: stripped, codigoBarras: null });
       }
 
       const item = await prisma.item.findFirst({

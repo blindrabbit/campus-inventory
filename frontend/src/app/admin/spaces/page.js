@@ -316,7 +316,14 @@ export default function AdminSpacesPage() {
                     {space.responsible || "-"}
                   </td>
                   <td className="px-6 py-4 text-sm text-slate-700">
-                    {space.itemCount}
+                    <div className="font-medium text-slate-800">
+                      {space.itemCount}
+                    </div>
+                    {Number(space.totalItemCount || 0) > Number(space.itemCount || 0) ? (
+                      <div className="mt-1 text-xs text-amber-700">
+                        {space.totalItemCount} vinculado{space.totalItemCount !== 1 ? "s" : ""} no total
+                      </div>
+                    ) : null}
                   </td>
                   <td className="px-6 py-4 text-sm">
                     <span

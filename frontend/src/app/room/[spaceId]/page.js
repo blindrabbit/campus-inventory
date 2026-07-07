@@ -148,6 +148,7 @@ export default function RoomPage() {
     }, 340);
   }, []);
   const [showRelocatedItems, setShowRelocatedItems] = useState(true);
+  const [groupSimilarItems, setGroupSimilarItems] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState({});
   const [itemSearchFilter, setItemSearchFilter] = useState("");
 
@@ -578,6 +579,7 @@ export default function RoomPage() {
 
     const groupMap = {};
     const rows = [];
+    const singles = [];
     for (const item of filteredItems) {
       if (item.itemGroupId) {
         if (!groupMap[item.itemGroupId]) {
@@ -591,14 +593,51 @@ export default function RoomPage() {
         }
         groupMap[item.itemGroupId].items.push(item);
       } else {
-        rows.push({ type: "single", item });
+        singles.push(item);
       }
     }
 
+    // Modo "ver itens agrupados": empilha visualmente itens sem grupo formal
+    // que compartilham a mesma descrição. É só uma pilha visual — não cria
+    // ItemGroup no banco, então ações exclusivas de grupo real (puxar por
+    // patrimônio) não se aplicam aqui. Movimentação de cada item continua
+    // usando os mesmos botões e endpoints individuais de sempre.
+    if (groupSimilarItems) {
+      const similarMap = {};
+      const soloSingles = [];
+      for (const item of singles) {
+        const key = normalizeString(item.descricao || "");
+        if (!key) {
+          soloSingles.push(item);
+          continue;
+        }
+        if (!similarMap[key]) similarMap[key] = [];
+        similarMap[key].push(item);
+      }
+      Object.values(similarMap).forEach((clusterItems) => {
+        if (clusterItems.length > 1) {
+          rows.push({
+            type: "group",
+            groupId: `similar::${normalizeString(clusterItems[0].descricao || "")}`,
+            groupName: clusterItems[0].descricao,
+            items: clusterItems,
+            isVirtual: true,
+          });
+        } else {
+          soloSingles.push(clusterItems[0]);
+        }
+      });
+      soloSingles.forEach((item) => rows.push({ type: "single", item }));
+    } else {
+      singles.forEach((item) => rows.push({ type: "single", item }));
+    }
+
     // Ordena itens dentro de cada grupo com a mesma regra geral.
-    Object.values(groupMap).forEach((groupRow) => {
-      groupRow.items.sort(compareItems);
-    });
+    rows
+      .filter((row) => row.type === "group")
+      .forEach((groupRow) => {
+        groupRow.items.sort(compareItems);
+      });
 
     // Ordenação final das linhas.
     rows.sort((a, b) => {
@@ -621,7 +660,7 @@ export default function RoomPage() {
     });
 
     return rows;
-  }, [filteredItems]);
+  }, [filteredItems, groupSimilarItems]);
 
   const foundItemsCount = useMemo(
     () => items.filter((item) => item.statusEncontrado === "SIM").length,
@@ -2592,6 +2631,20 @@ export default function RoomPage() {
                     {relocatedItemsCount}
                   </span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setGroupSimilarItems((prev) => !prev)}
+                  aria-pressed={groupSimilarItems}
+                  title="Empilha visualmente itens sem grupo formal que têm a mesma descrição. Não altera como os itens são movidos ou conferidos."
+                  className={`inline-flex items-center gap-0.5 md:gap-2 rounded-full border px-1.5 md:px-3 py-0.5 md:py-1.5 text-xs md:text-sm font-medium transition whitespace-nowrap flex-shrink-0 ${
+                    groupSimilarItems
+                      ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+                      : "border-slate-300 bg-slate-100 text-slate-500"
+                  }`}
+                >
+                  <span>{groupSimilarItems ? "✓" : "○"}</span>
+                  <span>📦 Ver itens agrupados</span>
+                </button>
               </div>
             </div>
 
@@ -2686,12 +2739,16 @@ export default function RoomPage() {
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <span className="text-indigo-600 text-lg">🗂</span>
+                            <span className="text-indigo-600 text-lg">
+                              {row.isVirtual ? "📦" : "🗂"}
+                            </span>
                             <span className="font-bold text-lg text-indigo-800">
                               {row.groupName}
                             </span>
+                          </div>
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
                             <span className="px-2 py-0.5 bg-indigo-100 text-indigo-700 text-xs rounded-full font-medium">
-                              Grupo · {totalCount} itens
+                              {row.isVirtual ? "Similares" : "Grupo"} · {totalCount} itens
                             </span>
                             {relocatedCount > 0 && (
                               <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium">
@@ -2774,7 +2831,7 @@ export default function RoomPage() {
                               ✅ Encontrar tudo
                             </button>
                           )}
-                          {!isViewer && (
+                          {!isViewer && !row.isVirtual && (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();

@@ -95,6 +95,16 @@ const DASHBOARD_TABS = [
   },
 ];
 const ADMIN_MENU_TAB_IDS = ["usuarios", "dados", "backups"];
+const SPACE_TABLE_COLUMNS = [
+  { key: "name", label: "Espaço", align: "left" },
+  { key: "status", label: "Status", align: "left" },
+  { key: "responsible", label: "Responsável", align: "left" },
+  { key: "totalItemCount", label: "Total", align: "right" },
+  { key: "foundItemCount", label: "Encontrados", align: "right" },
+  { key: "unfoundItemCount", label: "Não localizados", align: "right" },
+  { key: "itemCount", label: "Visíveis", align: "right" },
+  { key: "startedAt", label: "Início", align: "left" },
+];
 const UNFOUND_TABLE_COLUMNS = [
   { key: "patrimonio", label: "N patrimonio", align: "left" },
   { key: "descricao", label: "Descrição", align: "left" },
@@ -151,6 +161,43 @@ function getUnfoundSortValue(item, key) {
   }
 
   return item[key] ?? "";
+}
+
+function getSpaceTableSortValue(space, key) {
+  if (key === "status") {
+    return getSpaceStatusLabel(space);
+  }
+
+  if (key === "responsible") {
+    return space.responsibleDisplay || space.responsible || "";
+  }
+
+  if (key === "startedAt") {
+    return space.startedAt ? new Date(space.startedAt).getTime() : null;
+  }
+
+  if (
+    key === "totalItemCount" ||
+    key === "foundItemCount" ||
+    key === "unfoundItemCount" ||
+    key === "itemCount"
+  ) {
+    return Number(space[key] || 0);
+  }
+
+  return space[key] ?? "";
+}
+
+function getSpaceStatusLabel(space) {
+  if (space.isActive === false) return "Desativado";
+  if (space.isVerified && space.confirmedBy) return "Conferido";
+  if (space.isFinalized || space.executionStatus === "FINALIZADO") {
+    return "Finalizado";
+  }
+  if (space.startedAt || space.executionStatus === "INICIADO") {
+    return "Iniciado";
+  }
+  return "Não iniciado";
 }
 
 function compareNullableValues(aValue, bValue, direction) {
@@ -440,6 +487,181 @@ function DupItemCard({ item, onResolve }) {
   );
 }
 
+function SpacesTable({
+  spaces,
+  sort,
+  onSort,
+  onOpen,
+  onEdit,
+  onDeactivate,
+  onReactivate,
+  canManageSpaces,
+  isInventoryAdmin,
+  fmtDate,
+}) {
+  const getRowClass = (space) => {
+    if (space.isActive === false) {
+      return "bg-zinc-100 text-zinc-600 hover:bg-zinc-200/70";
+    }
+    if (space.isVerified && space.confirmedBy) {
+      return "bg-purple-50 text-purple-950 hover:bg-purple-100/70";
+    }
+    if (space.isFinalized || space.executionStatus === "FINALIZADO") {
+      return "bg-emerald-50 text-emerald-950 hover:bg-emerald-100/70";
+    }
+    if (space.startedAt || space.executionStatus === "INICIADO") {
+      return "bg-amber-50 text-amber-950 hover:bg-amber-100/70";
+    }
+    return "bg-rose-50 text-rose-950 hover:bg-rose-100/70";
+  };
+
+  return (
+    <div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full border-separate border-spacing-y-3 text-sm">
+          <thead className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <tr>
+              {SPACE_TABLE_COLUMNS.map((column) => {
+                const isActive = sort.key === column.key;
+                return (
+                  <th
+                    key={column.key}
+                    className={`px-4 py-2 ${
+                      column.align === "right" ? "text-right" : "text-left"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onSort(column.key)}
+                      className={`inline-flex max-w-full items-center gap-1.5 rounded px-1 py-0.5 transition hover:bg-slate-200 ${
+                        isActive ? "text-slate-900" : "text-slate-500"
+                      }`}
+                    >
+                      <span className="truncate">{column.label}</span>
+                      <span className="shrink-0 text-[11px]">
+                        {isActive ? (sort.direction === "asc" ? "↑" : "↓") : "↕"}
+                      </span>
+                    </button>
+                  </th>
+                );
+              })}
+              <th className="px-4 py-2 text-right">Ações</th>
+            </tr>
+          </thead>
+          <tbody>
+            {spaces.map((space) => {
+              const isDeactivated = space.isActive === false;
+              const displayName = isDeactivated
+                ? `DESATIVADO - ${space.name}`
+                : space.name;
+              const statusLabel = getSpaceStatusLabel(space);
+              const canDeactivate =
+                isInventoryAdmin && !isDeactivated && Number(space.itemCount || 0) === 0;
+
+              return (
+                <tr
+                  key={space.id}
+                  className={`align-top shadow-sm transition hover:shadow-md ${getRowClass(space)}`}
+                >
+                  <td className="rounded-l-xl border-y border-l border-white/70 px-4 py-4 font-semibold">
+                    <button
+                      type="button"
+                      disabled={isDeactivated}
+                      onClick={() => onOpen(space)}
+                      className={`text-left ${
+                        isDeactivated
+                          ? "cursor-default text-zinc-700"
+                          : "hover:text-blue-700"
+                      }`}
+                    >
+                      {displayName}
+                    </button>
+                  </td>
+                  <td className="border-y border-white/70 px-4 py-4">
+                    <span
+                      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                        isDeactivated
+                          ? "bg-zinc-200 text-zinc-700"
+                          : space.isVerified && space.confirmedBy
+                            ? "bg-purple-100 text-purple-800"
+                            : space.isFinalized
+                              ? "bg-emerald-100 text-emerald-800"
+                              : space.startedAt
+                                ? "bg-amber-100 text-amber-800"
+                                : "bg-rose-100 text-rose-800"
+                      }`}
+                    >
+                      {statusLabel}
+                    </span>
+                  </td>
+                  <td className="border-y border-white/70 px-4 py-4">
+                    {space.responsibleDisplay || space.responsible || "Não informado"}
+                  </td>
+                  <td className="border-y border-white/70 px-4 py-4 text-right font-semibold">
+                    {space.totalItemCount || 0}
+                  </td>
+                  <td className="border-y border-white/70 px-4 py-4 text-right font-medium text-emerald-700">
+                    {space.foundItemCount || 0}
+                  </td>
+                  <td className="border-y border-white/70 px-4 py-4 text-right font-medium text-rose-700">
+                    {space.unfoundItemCount || 0}
+                  </td>
+                  <td className="border-y border-white/70 px-4 py-4 text-right font-medium text-blue-700">
+                    {space.itemCount || 0}
+                  </td>
+                  <td className="border-y border-white/70 px-4 py-4">
+                    {fmtDate(space.startedAt)}
+                  </td>
+                  <td className="rounded-r-xl border-y border-r border-white/70 px-4 py-4">
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {!isDeactivated ? (
+                        <button
+                          type="button"
+                          onClick={() => onOpen(space)}
+                          className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          Abrir
+                        </button>
+                      ) : null}
+                      {canManageSpaces ? (
+                        <button
+                          type="button"
+                          onClick={() => onEdit(space)}
+                          className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          Editar
+                        </button>
+                      ) : null}
+                      {isInventoryAdmin && isDeactivated ? (
+                        <button
+                          type="button"
+                          onClick={() => onReactivate(space)}
+                          className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700"
+                        >
+                          Reativar
+                        </button>
+                      ) : null}
+                      {canDeactivate ? (
+                        <button
+                          type="button"
+                          onClick={() => onDeactivate(space)}
+                          className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-sm font-semibold text-rose-700 hover:bg-rose-100"
+                        >
+                          Desativar
+                        </button>
+                      ) : null}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const [spaces, setSpaces] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -466,8 +688,15 @@ export default function DashboardPage() {
   const [searchingUsers, setSearchingUsers] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
   const [newMemberRole, setNewMemberRole] = useState("CONFERENTE");
+  const [spaceViewMode, setSpaceViewMode] = useState("cards");
   const [spaceItemCountMin, setSpaceItemCountMin] = useState("");
   const [spaceItemCountMax, setSpaceItemCountMax] = useState("");
+  const [spaceStatusFilter, setSpaceStatusFilter] = useState("");
+  const [spaceTableSearch, setSpaceTableSearch] = useState("");
+  const [spaceTableSort, setSpaceTableSort] = useState({
+    key: "name",
+    direction: "asc",
+  });
   const [allItems, setAllItems] = useState([]);
   const [loadingItems, setLoadingItems] = useState(false);
   const [groupedItems, setGroupedItems] = useState({});
@@ -717,17 +946,64 @@ export default function DashboardPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaces]);
 
-  const filteredSpacesByItemCount = useMemo(() => {
+  const filteredSpaces = useMemo(() => {
     const min = spaceItemCountMin === "" ? null : Number(spaceItemCountMin);
     const max = spaceItemCountMax === "" ? null : Number(spaceItemCountMax);
+    const term = normalizeComparableText(spaceTableSearch);
 
     return sortedSpaces.filter((space) => {
       const count = Number(space.itemCount || 0);
       if (min !== null && count < min) return false;
       if (max !== null && count > max) return false;
+      if (spaceStatusFilter && getSpacePhase(space) !== spaceStatusFilter) {
+        return false;
+      }
+      if (term) {
+        const searchable = normalizeComparableText(
+          [
+            space.name,
+            space.responsibleDisplay,
+            space.responsible,
+            space.sector,
+            space.unit,
+            getSpaceStatusLabel(space),
+          ].filter(Boolean).join(" "),
+        );
+        if (!searchable.includes(term)) return false;
+      }
       return true;
     });
-  }, [sortedSpaces, spaceItemCountMin, spaceItemCountMax]);
+  }, [
+    sortedSpaces,
+    spaceItemCountMin,
+    spaceItemCountMax,
+    spaceStatusFilter,
+    spaceTableSearch,
+  ]);
+
+  const displayedSpaces = useMemo(() => {
+    if (spaceViewMode !== "table") return filteredSpaces;
+
+    return [...filteredSpaces].sort((a, b) => {
+      const result = compareNullableValues(
+        getSpaceTableSortValue(a, spaceTableSort.key),
+        getSpaceTableSortValue(b, spaceTableSort.key),
+        spaceTableSort.direction,
+      );
+
+      if (result !== 0) return result;
+
+      return compareNullableValues(a.name, b.name, "asc");
+    });
+  }, [filteredSpaces, spaceTableSort, spaceViewMode]);
+
+  const handleSpaceTableSort = (key) => {
+    setSpaceTableSort((current) => ({
+      key,
+      direction:
+        current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  };
 
   const fmtDate = (value) =>
     value ? new Date(value).toLocaleDateString("pt-BR") : "--/--/--";
@@ -2510,6 +2786,56 @@ export default function DashboardPage() {
             <div className="w-full lg:max-w-2xl">
               <SpaceSearchBar placeholder="Buscar espaços por nome..." />
               <div className="mt-3 flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                <div className="flex rounded-lg border border-slate-300 bg-slate-50 p-1">
+                  {[
+                    { key: "cards", label: "Cards" },
+                    { key: "table", label: "Tabela" },
+                  ].map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setSpaceViewMode(option.key)}
+                      className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                        spaceViewMode === option.key
+                          ? "bg-slate-900 text-white shadow-sm"
+                          : "text-slate-600 hover:bg-white"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="min-w-[220px] flex-1">
+                  <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">
+                    Filtrar tabela
+                  </label>
+                  <input
+                    type="text"
+                    value={spaceTableSearch}
+                    onChange={(event) => setSpaceTableSearch(event.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    placeholder="Nome, responsável, setor..."
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">
+                    Status
+                  </label>
+                  <select
+                    value={spaceStatusFilter}
+                    onChange={(event) => setSpaceStatusFilter(event.target.value)}
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  >
+                    <option value="">Todos</option>
+                    <option value="NAO_INICIADO">Não iniciado</option>
+                    <option value="INICIADO">Iniciado</option>
+                    <option value="FINALIZADO">Finalizado</option>
+                    <option value="CONFERIDO">Conferido</option>
+                    {isInventoryAdmin ? (
+                      <option value="DESATIVADO">Desativado</option>
+                    ) : null}
+                  </select>
+                </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">
                     Itens mín.
@@ -2536,12 +2862,14 @@ export default function DashboardPage() {
                     placeholder="Todos"
                   />
                 </div>
-                {(spaceItemCountMin || spaceItemCountMax) ? (
+                {(spaceItemCountMin || spaceItemCountMax || spaceStatusFilter || spaceTableSearch) ? (
                   <button
                     type="button"
                     onClick={() => {
                       setSpaceItemCountMin("");
                       setSpaceItemCountMax("");
+                      setSpaceStatusFilter("");
+                      setSpaceTableSearch("");
                     }}
                     className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
                   >
@@ -2549,7 +2877,7 @@ export default function DashboardPage() {
                   </button>
                 ) : null}
                 <span className="ml-auto text-xs text-slate-500">
-                  {filteredSpacesByItemCount.length} de {sortedSpaces.length} sala{sortedSpaces.length !== 1 ? "s" : ""}
+                  {displayedSpaces.length} de {sortedSpaces.length} sala{sortedSpaces.length !== 1 ? "s" : ""}
                 </span>
               </div>
             </div>
@@ -2568,7 +2896,7 @@ export default function DashboardPage() {
         ) : null}
 
 
-        {activeTab === "espacos" && filteredSpacesByItemCount.length === 0 ? (
+        {activeTab === "espacos" && displayedSpaces.length === 0 ? (
           <div className="bg-white rounded-xl shadow-md p-12 text-center">
             <div className="text-6xl mb-4">📦</div>
             <h3 className="text-xl font-semibold text-gray-800 mb-2">
@@ -2579,8 +2907,22 @@ export default function DashboardPage() {
             </p>
           </div>
         ) : activeTab === "espacos" ? (
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {filteredSpacesByItemCount.map((space) => {
+          spaceViewMode === "table" ? (
+            <SpacesTable
+              spaces={displayedSpaces}
+              sort={spaceTableSort}
+              onSort={handleSpaceTableSort}
+              onOpen={(space) => router.push(`/room/${space.id}`)}
+              onEdit={openEditSpaceModal}
+              onDeactivate={handleDeactivateSpace}
+              onReactivate={handleReactivateSpace}
+              canManageSpaces={canManageSpaces}
+              isInventoryAdmin={isInventoryAdmin}
+              fmtDate={fmtDate}
+            />
+          ) : (
+            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {displayedSpaces.map((space) => {
               const phaseBadges = getSpacePhaseBadges(space);
               const phase = getSpacePhase(space);
               const phaseStyle = SPACE_PHASE_STYLES[phase];
@@ -2702,7 +3044,7 @@ export default function DashboardPage() {
                         </>
                       )}
                     </div>
-                    {isInventoryAdmin && !isDeactivated && (space.totalItemCount ?? space.itemCount) === 0 ? (
+                    {isInventoryAdmin && !isDeactivated && Number(space.itemCount || 0) === 0 ? (
                       <div className="mt-3 flex justify-end">
                         <button
                           type="button"
@@ -2720,7 +3062,8 @@ export default function DashboardPage() {
                 </div>
               );
             })}
-          </div>
+            </div>
+          )
         ) : null}
 
         {activeTab === "criar-grupos" ? (
