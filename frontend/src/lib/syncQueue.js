@@ -101,7 +101,11 @@ export function setSyncErrorListener(fn) {
 // Inicializar fila do IndexedDB
 if (isBrowser) {
   localforage.getItem(QUEUE_KEY).then((stored) => {
-    queue = normalizeQueueEntries(stored);
+    // Mescla com o que já foi enfileirado (ex.: cliques do usuário) enquanto
+    // esta leitura assíncrona estava em andamento, em vez de sobrescrever —
+    // caso contrário essas ações seriam perdidas silenciosamente.
+    const storedNormalized = normalizeQueueEntries(stored);
+    queue = normalizeQueueEntries([...storedNormalized, ...queue]);
     saveQueue();
     if (queue.length > 0 && isOnline) processQueue();
   });
