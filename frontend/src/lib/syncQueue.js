@@ -2,9 +2,21 @@
 import localforage from "localforage";
 
 const QUEUE_KEY = "inventario_sync_queue";
+// Bump this whenever syncQueue muda, para conseguirmos confirmar no console
+// do navegador qual versão do código está de fato rodando (cache/aba antiga).
+const SYNC_VERSION = "2026-07-13c";
+const TAB_ID = Math.random().toString(36).slice(2, 8);
 const isBrowser = typeof window !== "undefined";
 let isOnline = isBrowser ? navigator.onLine : true;
 let queue = [];
+
+function slog(...args) {
+  if (isBrowser) console.log(`[SYNC ${SYNC_VERSION} tab:${TAB_ID}]`, ...args);
+}
+
+if (isBrowser) {
+  slog("syncQueue carregado. online =", isOnline);
+}
 
 function buildActionKey(action) {
   const method = action?.method || "POST";
@@ -140,41 +152,68 @@ export function enqueueAction(action) {
     timestamp: Date.now(),
     actionKey,
   });
+  slog("enqueue", normalizedAction.endpoint, normalizedAction.payload?.itemId, "→ fila agora tem", queue.length);
   saveQueue();
 
   if (isOnline) processQueue();
   return action.id;
 }
 
-async function saveQueue() {
-  await localforage.setItem(QUEUE_KEY, queue);
+// Serializa as gravações no IndexedDB para que gravações concorrentes não se
+// sobrescrevam (a versão anterior fazia setItem em paralelo, podendo perder
+// itens enfileirados durante o processamento).
+let savePromise = Promise.resolve();
+function saveQueue() {
+  savePromise = savePromise
+    .catch(() => {})
+    .then(() => localforage.setItem(QUEUE_KEY, queue.slice()));
+  return savePromise;
 }
 
 async function processQueue() {
-  if (isProcessing || !isBrowser || !isOnline || queue.length === 0) return;
+  if (isProcessing || !isBrowser || !isOnline || queue.length === 0) {
+    slog("processQueue ignorado", { isProcessing, isOnline, len: queue.length });
+    return;
+  }
   isProcessing = true;
+  slog("processQueue INÍCIO, fila =", queue.length);
 
   const api = process.env.NEXT_PUBLIC_API_URL || "/api";
   const token = localStorage.getItem("token");
   const activeInventoryId = localStorage.getItem("activeInventoryId");
   if (!token) {
+    slog("processQueue abortado: sem token");
     isProcessing = false;
     return;
   }
 
+  try {
   // Processar em ordem FIFO
   while (queue.length > 0) {
     const action = queue[0];
     try {
-      const response = await fetch(`${api}${action.endpoint}`, {
-        method: action.method || "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-          ...(activeInventoryId ? { "x-inventory-id": activeInventoryId } : {}),
-        },
-        body: JSON.stringify(action.payload),
-      });
+      // Timeout para que uma requisição travada (rede/proxy) não bloqueie a
+      // fila inteira para sempre — sem isto, um fetch pendurado deixava o
+      // mutex isProcessing preso e nenhuma ação seguinte era enviada.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      slog("→ enviando", action.endpoint, action.payload?.itemId);
+      let response;
+      try {
+        response = await fetch(`${api}${action.endpoint}`, {
+          method: action.method || "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+            ...(activeInventoryId ? { "x-inventory-id": activeInventoryId } : {}),
+          },
+          body: JSON.stringify(action.payload),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      slog("← resposta", action.endpoint, response.status);
 
       // Validar que a resposta foi bem-sucedida (2xx)
       if (!response.ok) {
@@ -263,5 +302,10 @@ async function processQueue() {
       break; // Para na falha, tenta depois
     }
   }
-  isProcessing = false;
+  } finally {
+    // Garante que o mutex é SEMPRE liberado, mesmo se algo inesperado lançar
+    // no meio do loop — caso contrário a fila trava para o resto da sessão.
+    isProcessing = false;
+    slog("processQueue FIM, fila restante =", queue.length);
+  }
 }
