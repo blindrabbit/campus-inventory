@@ -89,6 +89,15 @@ function generateActionId() {
 // Mutex: impede execuções concorrentes de processQueue
 let isProcessing = false;
 
+// Permite que a UI seja avisada quando uma ação é descartada da fila
+// (ex.: token expirado, inventário pausado, sala lacrada) para exibir
+// feedback ao usuário em vez de falhar silenciosamente.
+let errorListener = null;
+
+export function setSyncErrorListener(fn) {
+  errorListener = fn;
+}
+
 // Inicializar fila do IndexedDB
 if (isBrowser) {
   localforage.getItem(QUEUE_KEY).then((stored) => {
@@ -144,7 +153,10 @@ async function processQueue() {
   const api = process.env.NEXT_PUBLIC_API_URL || "/api";
   const token = localStorage.getItem("token");
   const activeInventoryId = localStorage.getItem("activeInventoryId");
-  if (!token) return;
+  if (!token) {
+    isProcessing = false;
+    return;
+  }
 
   // Processar em ordem FIFO
   while (queue.length > 0) {
@@ -163,16 +175,19 @@ async function processQueue() {
       // Validar que a resposta foi bem-sucedida (2xx)
       if (!response.ok) {
         let errorBody = "";
+        let userMessage = "";
         try {
           errorBody = await response.text();
+          userMessage = JSON.parse(errorBody)?.error || "";
         } catch {
-          errorBody = "";
+          // corpo não é JSON ou está vazio; mantém errorBody bruto
         }
 
         const httpError = new Error(
           `HTTP ${response.status} ao sincronizar ${action.endpoint}${errorBody ? `: ${errorBody}` : ""}`,
         );
         httpError.status = response.status;
+        httpError.userMessage = userMessage;
         throw httpError;
       }
 
@@ -182,8 +197,26 @@ async function processQueue() {
     } catch (err) {
       const statusCode = err?.status || 0;
 
+      // 401: sessão expirada/token inválido. Nunca vai funcionar sem novo
+      // login, então avisa o usuário e redireciona em vez de descartar
+      // a ação silenciosamente (o usuário perderia a confirmação sem saber).
+      if (statusCode === 401) {
+        console.warn("🔒 Sessão expirada ao sincronizar:", action.endpoint);
+        localStorage.removeItem("token");
+        localStorage.removeItem("user");
+        localStorage.removeItem("activeInventoryId");
+        localStorage.removeItem("activeInventory");
+        errorListener?.({
+          endpoint: action.endpoint,
+          status: statusCode,
+          message: err?.userMessage || "Sessão expirada. Faça login novamente.",
+        });
+        window.location.href = "/login";
+        break;
+      }
+
       // Erros 4xx (cliente): requisição inválida, nunca vai funcionar
-      // Remover da fila e logar para auditoria
+      // Remover da fila, logar para auditoria e avisar o usuário
       if (statusCode >= 400 && statusCode < 500) {
         const message = err?.message || "";
         const isExpectedRelocateConflict =
@@ -203,6 +236,11 @@ async function processQueue() {
             action.endpoint,
             err?.message || err,
           );
+          errorListener?.({
+            endpoint: action.endpoint,
+            status: statusCode,
+            message: err?.userMessage || "Falha ao salvar ação",
+          });
         }
 
         queue.shift();

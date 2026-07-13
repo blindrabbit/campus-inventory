@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import axios from "axios";
-import { enqueueAction, useAutoSave } from "../../../lib/syncQueue";
+import { enqueueAction, useAutoSave, setSyncErrorListener } from "../../../lib/syncQueue";
 import { useSSE } from "../../../lib/useSSE";
 import Modal from "../../../components/Modal/Modal";
 import ModalBody from "../../../components/Modal/ModalBody";
@@ -174,8 +174,29 @@ export default function RoomPage() {
   });
   const { lastEvent, connectionId } = sseHook;
 
-  // React to SSE events — show toast and refresh data
   const loadDataRef = useMemo(() => ({ current: null }), []);
+
+  // Avisa o usuário quando uma ação enfileirada (ex.: confirmar item) falha
+  // permanentemente ao sincronizar (sessão expirada, sala/inventário
+  // bloqueado, etc.) em vez de falhar silenciosamente, e ressincroniza
+  // a tela com o servidor para desfazer qualquer atualização otimista.
+  useEffect(() => {
+    setSyncErrorListener(({ status, message }) => {
+      showToast({
+        type: "error",
+        title: "Não foi possível salvar a confirmação",
+        message: message || `Erro HTTP ${status} ao sincronizar. Recarregue a página.`,
+      });
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      if (token && inventoryId && loadDataRef.current) {
+        loadDataRef.current(token, inventoryId);
+      }
+    });
+    return () => setSyncErrorListener(null);
+  }, [showToast, loadDataRef]);
+
+  // React to SSE events — show toast and refresh data
   useEffect(() => {
     if (!lastEvent) return;
     const token = localStorage.getItem("token");
