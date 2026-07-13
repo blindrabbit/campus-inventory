@@ -265,14 +265,3 @@ async function processQueue() {
   }
   isProcessing = false;
 }
-
-// Hook simplificado para debounce + auto-save
-export function useAutoSave() {
-  let timer = null;
-  return (actionFn, delay = 1000) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      actionFn();
-    }, delay);
-  };
-}

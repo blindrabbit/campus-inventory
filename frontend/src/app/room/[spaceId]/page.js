@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import axios from "axios";
-import { enqueueAction, useAutoSave, setSyncErrorListener } from "../../../lib/syncQueue";
+import { enqueueAction, setSyncErrorListener } from "../../../lib/syncQueue";
 import { useSSE } from "../../../lib/useSSE";
 import Modal from "../../../components/Modal/Modal";
 import ModalBody from "../../../components/Modal/ModalBody";
@@ -60,7 +60,6 @@ export default function RoomPage() {
   const params = useParams();
   const router = useRouter();
   const spaceId = params.spaceId;
-  const autoSave = useAutoSave();
   const { showToast } = useToast();
 
   const [space, setSpace] = useState(null);
@@ -1014,12 +1013,15 @@ export default function RoomPage() {
       const inventoryId = localStorage.getItem("activeInventoryId");
       const itemBeforeUpdate = items.find((i) => i.id === itemId);
 
-      autoSave(() => {
-        enqueueAction({
-          endpoint: "/items/check",
-          method: "POST",
-          payload: { itemId, condicao, inventoryId, connectionId },
-        });
+      // Enfileira imediatamente. NÃO usar debounce aqui: cada confirmação é
+      // uma ação discreta sobre um item específico. Um debounce compartilhado
+      // faria cada clique cancelar o enqueue do item anterior, de modo que
+      // apenas uma confirmação chegaria ao backend ao conferir vários itens
+      // em sequência. A fila (enqueueAction) já cuida de ordem e deduplicação.
+      enqueueAction({
+        endpoint: "/items/check",
+        method: "POST",
+        payload: { itemId, condicao, inventoryId, connectionId },
       });
 
       if (itemBeforeUpdate) {
@@ -1037,27 +1039,26 @@ export default function RoomPage() {
         setSaving(false);
       });
     },
-    [autoSave, items, registerLocalHistoryAction, triggerItemExit],
+    [items, registerLocalHistoryAction, triggerItemExit, connectionId],
   );
 
   const handleRelocate = useCallback(
     (itemId, targetSpaceId) => {
       setSaving(true);
       setRelocateModal(null);
-      autoSave(() => {
-        const inventoryId = localStorage.getItem("activeInventoryId");
-        enqueueAction({
-          endpoint: "/items/relocate",
-          method: "POST",
-          payload: { itemId, targetSpaceId, inventoryId, connectionId },
-        });
+      // Enfileira imediatamente (sem debounce) — ver comentário em handleCheck.
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      enqueueAction({
+        endpoint: "/items/relocate",
+        method: "POST",
+        payload: { itemId, targetSpaceId, inventoryId, connectionId },
       });
       triggerItemExit(itemId, "moving", () => {
         setItems((prev) => prev.filter((i) => i.id !== itemId));
         setSaving(false);
       });
     },
-    [autoSave, triggerItemExit],
+    [triggerItemExit, connectionId],
   );
 
   const confirmFinalize = async () => {
