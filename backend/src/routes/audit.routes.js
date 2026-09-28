@@ -31,11 +31,13 @@ async function buildNameMap(samAccountNames) {
   return Object.fromEntries(users.map((u) => [u.samAccountName, u.fullName]));
 }
 
+// Conferentes e revisores também consultam esta lista pela aba "Não Localizados"
+// do dashboard — a edição do apurador continua restrita a ADMIN_CICLO.
 router.get(
   "/unfound-items",
   verifyJWT,
   requireInventoryAccess(),
-  requireRole("ADMIN"),
+  requireInventoryRoles("ADMIN_CICLO", "REVISOR", "CONFERENTE"),
   async (req, res) => {
     try {
       const { fromSpaceId, conferente, action, fromDate, toDate } = req.query;
@@ -135,6 +137,7 @@ router.get(
             ultimoLocalConhecidoId: item.spaceId,
             dataAquisicao: item.dataAquisicao,
             valor: item.valor,
+            apurador: item.apurador,
             conferente: nameMap[conferenteSam] || conferenteSam || null,
             historicoLocalizacoes: item.history.map((h) => formatHistoryEntry(h, nameMap)),
           };

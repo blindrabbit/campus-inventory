@@ -160,6 +160,9 @@ model Item {
   duplicateObservedSpaceId String? @map("duplicate_observed_space_id")
   duplicateObservedSpace Space? @relation("ItemDuplicateObservedSpace", fields: [duplicateObservedSpaceId], references: [id], onDelete: SetNull)
 
+  // Apuração de responsabilidade (itens não localizados)
+  apurador          String?    @map("apurador")
+
   // Grupos
   itemGroupId       String?
   itemGroup         ItemGroup? @relation(fields: [itemGroupId], references: [id], onDelete: SetNull)

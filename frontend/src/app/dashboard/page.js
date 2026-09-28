@@ -9,6 +9,7 @@ import ModalBody from "../../components/Modal/ModalBody";
 import ModalFooter from "../../components/Modal/ModalFooter";
 import SpaceSearchBar from "../../components/SpaceSearchBar/SpaceSearchBar";
 import StrategicDashboardPanel from "../../components/StrategicDashboardPanel/StrategicDashboardPanel";
+import { APURADOR_SETORES } from "../../lib/apuradorSetores";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 const INVENTORY_ROLES = [
@@ -111,7 +112,9 @@ const UNFOUND_TABLE_COLUMNS = [
   { key: "localAnterior", label: "Onde ele estava", align: "left" },
   { key: "dataAquisicao", label: "Data de aquisição", align: "left" },
   { key: "valor", label: "Valor do bem", align: "right" },
+  { key: "apurador", label: "Apurador", align: "left" },
 ];
+const UNFOUND_NO_APURADOR = "__SEM_APURADOR__";
 
 const HISTORY_ACTION_LABELS = {
   ENCONTRADO: "Encontrado",
@@ -121,6 +124,8 @@ const HISTORY_ACTION_LABELS = {
   ESTORNADO: "Estornado",
   VERIFICADO: "Verificado",
   NAO_LOCALIZADO_VERIFICACAO: "Não localizado na verificação",
+  APURADOR_DEFINIDO: "Apurador definido",
+  APURADOR_ALTERADO: "Apurador alterado",
 };
 
 function normalizeComparableText(value) {
@@ -128,6 +133,14 @@ function normalizeComparableText(value) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+}
+
+/** Salas elegíveis como destino de movimentação, filtradas por um termo de busca. */
+function filterDestinationSpaces(spaces, search) {
+  const term = normalizeComparableText(search).trim();
+  return (spaces || [])
+    .filter((s) => s.isActive !== false && !s.isFinalized)
+    .filter((s) => !term || normalizeComparableText(s.name).includes(term));
 }
 
 function getUnfoundInitialOrigin(item) {
@@ -158,6 +171,10 @@ function getUnfoundSortValue(item, key) {
 
   if (key === "valor") {
     return typeof item.valor === "number" ? item.valor : null;
+  }
+
+  if (key === "apurador") {
+    return item.apurador || "";
   }
 
   return item[key] ?? "";
@@ -243,13 +260,30 @@ function UnfoundItemsTable({
   onMoveItem,
   abbreviateName,
   fmtDate,
+  selectedIds,
+  onToggleSelect,
+  onToggleSelectAll,
+  onOpenApurador,
+  canEditApurador = true,
 }) {
+  const allVisibleSelected =
+    items.length > 0 && items.every((item) => selectedIds.has(item.id));
+
   return (
     <div className="overflow-hidden rounded-lg border border-slate-200">
       <div className="overflow-x-auto">
         <table className="min-w-full table-fixed divide-y divide-slate-200 text-sm">
           <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
             <tr>
+              <th className="w-10 px-3 py-3">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={() => onToggleSelectAll(items)}
+                  aria-label="Selecionar todos os itens visíveis"
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+              </th>
               {UNFOUND_TABLE_COLUMNS.map((column) => {
                 const sortIndex = sorts.findIndex((rule) => rule.key === column.key);
                 const isActive = sortIndex !== -1;
@@ -300,6 +334,15 @@ function UnfoundItemsTable({
               return (
                 <Fragment key={item.id}>
                   <tr key={item.id} className="align-top hover:bg-slate-50">
+                    <td className="px-3 py-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(item.id)}
+                        onChange={() => onToggleSelect(item.id)}
+                        aria-label={`Selecionar item #${item.patrimonio || item.id}`}
+                        className="h-4 w-4 rounded border-slate-300"
+                      />
+                    </td>
                     <td className="px-4 py-3 font-semibold text-slate-900">
                       <button
                         type="button"
@@ -321,10 +364,38 @@ function UnfoundItemsTable({
                     <td className="px-4 py-3 text-right font-medium text-slate-800">
                       {formatCurrencyValue(item.valor)}
                     </td>
+                    <td className="px-4 py-3 text-slate-700">
+                      {item.apurador ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="line-clamp-2 text-xs">{item.apurador}</span>
+                          {canEditApurador && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenApurador(item)}
+                              title="Alterar apurador"
+                              className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-200 hover:text-slate-800"
+                            >
+                              ✏️
+                            </button>
+                          )}
+                        </div>
+                      ) : canEditApurador ? (
+                        <button
+                          type="button"
+                          onClick={() => onOpenApurador(item)}
+                          title="Definir apurador"
+                          className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-slate-400 text-slate-500 hover:border-blue-500 hover:text-blue-600"
+                        >
+                          +
+                        </button>
+                      ) : (
+                        <span className="text-xs text-slate-400">-</span>
+                      )}
+                    </td>
                   </tr>
                   {isExpanded ? (
                     <tr className="bg-slate-50">
-                      <td colSpan={UNFOUND_TABLE_COLUMNS.length} className="px-4 py-4">
+                      <td colSpan={UNFOUND_TABLE_COLUMNS.length + 1} className="px-4 py-4">
                         <div className="grid gap-3 text-sm md:grid-cols-4">
                           <div>
                             <p className="text-xs font-medium uppercase text-slate-500">
@@ -743,7 +814,22 @@ export default function DashboardPage() {
   const [unfoundActionModal, setUnfoundActionModal] = useState(null); // { item, action: "mover" }
   const [unfoundCondicao, setUnfoundCondicao] = useState("BOM");
   const [unfoundMoveTargetSpaceId, setUnfoundMoveTargetSpaceId] = useState("");
+  const [unfoundMoveSpaceSearch, setUnfoundMoveSpaceSearch] = useState("");
   const [savingUnfoundAction, setSavingUnfoundAction] = useState(false);
+
+  // Movimentação em lote de itens não localizados
+  const [batchMoveModalOpen, setBatchMoveModalOpen] = useState(false);
+  const [batchMoveTargetSpaceId, setBatchMoveTargetSpaceId] = useState("");
+  const [batchMoveSpaceSearch, setBatchMoveSpaceSearch] = useState("");
+  const [batchMoveCondicao, setBatchMoveCondicao] = useState("BOM");
+  const [savingBatchMove, setSavingBatchMove] = useState(false);
+
+  // Apurador (setor responsável pela apuração) — seleção múltipla e modal
+  const [selectedApuradorIds, setSelectedApuradorIds] = useState(new Set());
+  const [apuradorModal, setApuradorModal] = useState(null); // { itemIds: string[], label: string }
+  const [apuradorSelectedValue, setApuradorSelectedValue] = useState("");
+  const [apuradorSearchFilter, setApuradorSearchFilter] = useState("");
+  const [savingApurador, setSavingApurador] = useState(false);
   const [dashboardSummary, setDashboardSummary] = useState(null);
   const [dashboardSummaryLoading, setDashboardSummaryLoading] = useState(false);
   const [dashboardSummaryError, setDashboardSummaryError] = useState("");
@@ -752,7 +838,11 @@ export default function DashboardPage() {
   // Filtros / agrupamento — Não Localizados
   const [unfoundSearch, setUnfoundSearch] = useState("");
   const [unfoundFilterRoom, setUnfoundFilterRoom] = useState("");
+  const [unfoundFilterApurador, setUnfoundFilterApurador] = useState("");
+  // "" = todos | "com" = somente com patrimônio | "sem" = somente sem patrimônio
+  const [unfoundFilterPatrimonio, setUnfoundFilterPatrimonio] = useState("");
   const [unfoundGroupByRoom, setUnfoundGroupByRoom] = useState(false);
+  const [unfoundGroupByApurador, setUnfoundGroupByApurador] = useState(false);
   const [unfoundSorts, setUnfoundSorts] = useState([
     { key: "patrimonio", direction: "asc" },
   ]);
@@ -885,10 +975,18 @@ export default function DashboardPage() {
     const inventoryRole = activeInventory?.role;
     if (inventoryRole === "REVISOR") {
       return DASHBOARD_TABS.filter(
-        (tab) => tab.id === "espacos" || tab.id === "criar-grupos",
+        (tab) =>
+          tab.id === "espacos" ||
+          tab.id === "criar-grupos" ||
+          tab.id === "nao-localizados",
       );
     }
-    // CONFERENTE e VISUALIZADOR veem apenas a aba de espaços
+    if (inventoryRole === "CONFERENTE") {
+      return DASHBOARD_TABS.filter(
+        (tab) => tab.id === "espacos" || tab.id === "nao-localizados",
+      );
+    }
+    // VISUALIZADOR vê apenas a aba de espaços
     return DASHBOARD_TABS.filter((tab) => tab.id === "espacos");
   }, [isInventoryAdmin, activeInventory?.role]);
 
@@ -1679,6 +1777,149 @@ export default function DashboardPage() {
     }
   };
 
+  const openBatchMoveModal = () => {
+    if (selectedApuradorIds.size === 0) return;
+    setBatchMoveTargetSpaceId("");
+    setBatchMoveSpaceSearch("");
+    setBatchMoveCondicao("BOM");
+    setBatchMoveModalOpen(true);
+  };
+
+  const handleBatchMoveSelected = async () => {
+    if (selectedApuradorIds.size === 0 || !batchMoveTargetSpaceId) return;
+
+    try {
+      setSavingBatchMove(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const itemIds = [...selectedApuradorIds];
+
+      const { data } = await axios.post(
+        `${API}/items/relocate-selected`,
+        {
+          itemIds,
+          targetSpaceId: batchMoveTargetSpaceId,
+          condicao: batchMoveCondicao,
+          inventoryId,
+        },
+        { headers: { Authorization: `Bearer ${token}` }, params: { inventoryId } },
+      );
+
+      const parts = [];
+      if (data.movedCount) parts.push(`${data.movedCount} movido(s)`);
+      if (data.undoneCount) parts.push(`${data.undoneCount} com marcação desfeita`);
+      if (data.skippedCount) parts.push(`${data.skippedCount} ignorado(s)`);
+
+      showToast({
+        type: data.skippedCount && !data.movedCount && !data.undoneCount ? "error" : "success",
+        title: "Movimentação em lote concluída",
+        message: parts.length ? parts.join(" • ") : "Nenhum item foi alterado.",
+      });
+
+      setBatchMoveModalOpen(false);
+      setSelectedApuradorIds(new Set());
+      await loadUnfoundItems(token);
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha ao mover itens",
+        message:
+          err.response?.data?.error || "Não foi possível mover os itens selecionados.",
+      });
+    } finally {
+      setSavingBatchMove(false);
+    }
+  };
+
+  const toggleApuradorSelect = (itemId) => {
+    setSelectedApuradorIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  };
+
+  const toggleApuradorSelectAll = (visibleItems) => {
+    setSelectedApuradorIds((prev) => {
+      const allSelected =
+        visibleItems.length > 0 && visibleItems.every((item) => prev.has(item.id));
+      const next = new Set(prev);
+      if (allSelected) {
+        visibleItems.forEach((item) => next.delete(item.id));
+      } else {
+        visibleItems.forEach((item) => next.add(item.id));
+      }
+      return next;
+    });
+  };
+
+  const openApuradorModalForItem = (item) => {
+    setApuradorSearchFilter("");
+    setApuradorSelectedValue(item.apurador || "");
+    setApuradorModal({
+      itemIds: [item.id],
+      label: `Item #${item.patrimonio || item.id}`,
+    });
+  };
+
+  const openApuradorModalForSelection = () => {
+    if (selectedApuradorIds.size === 0) return;
+    setApuradorSearchFilter("");
+    setApuradorSelectedValue("");
+    setApuradorModal({
+      itemIds: [...selectedApuradorIds],
+      label: `${selectedApuradorIds.size} itens selecionados`,
+    });
+  };
+
+  const handleSaveApurador = async () => {
+    if (!apuradorModal || !apuradorSelectedValue) return;
+
+    try {
+      setSavingApurador(true);
+      const token = localStorage.getItem("token");
+      const inventoryId = localStorage.getItem("activeInventoryId");
+      const { itemIds } = apuradorModal;
+
+      if (itemIds.length === 1) {
+        await axios.patch(
+          `${API}/items/${itemIds[0]}/apurador`,
+          { apurador: apuradorSelectedValue, inventoryId },
+          { headers: { Authorization: `Bearer ${token}` }, params: { inventoryId } },
+        );
+      } else {
+        await axios.post(
+          `${API}/items/apurador-batch`,
+          { itemIds, apurador: apuradorSelectedValue, inventoryId },
+          { headers: { Authorization: `Bearer ${token}` }, params: { inventoryId } },
+        );
+      }
+
+      showToast({
+        type: "success",
+        title: "Apurador definido",
+        message:
+          itemIds.length === 1
+            ? "Apurador atualizado com sucesso."
+            : `Apurador atualizado em ${itemIds.length} itens.`,
+      });
+
+      setApuradorModal(null);
+      setApuradorSelectedValue("");
+      setSelectedApuradorIds(new Set());
+      await loadUnfoundItems(token);
+    } catch (err) {
+      showToast({
+        type: "error",
+        title: "Falha ao definir apurador",
+        message: err.response?.data?.error || "Não foi possível definir o apurador.",
+      });
+    } finally {
+      setSavingApurador(false);
+    }
+  };
+
   loadSpacesRef.current = async (token, inventoryId) => {
     await loadSpaces(token, inventoryId);
 
@@ -2289,6 +2530,14 @@ export default function DashboardPage() {
     return Array.from(seen).sort((a, b) => a.localeCompare(b, "pt-BR"));
   }, [unfoundItems]);
 
+  const unfoundApuradores = useMemo(() => {
+    const seen = new Set();
+    for (const i of unfoundItems) {
+      if (i.apurador) seen.add(i.apurador);
+    }
+    return Array.from(seen).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [unfoundItems]);
+
   const filteredUnfoundItems = useMemo(() => {
     let list = unfoundItems;
     if (unfoundSearch.trim()) {
@@ -2303,8 +2552,27 @@ export default function DashboardPage() {
     if (unfoundFilterRoom) {
       list = list.filter((i) => (getUnfoundInitialOrigin(i) || "Sem sala") === unfoundFilterRoom);
     }
+    if (unfoundFilterApurador) {
+      list =
+        unfoundFilterApurador === UNFOUND_NO_APURADOR
+          ? list.filter((i) => !i.apurador)
+          : list.filter((i) => i.apurador === unfoundFilterApurador);
+    }
+    if (unfoundFilterPatrimonio) {
+      const hasPatrimonio = (i) => Boolean(String(i.patrimonio ?? "").trim());
+      list =
+        unfoundFilterPatrimonio === "com"
+          ? list.filter(hasPatrimonio)
+          : list.filter((i) => !hasPatrimonio(i));
+    }
     return list;
-  }, [unfoundItems, unfoundSearch, unfoundFilterRoom]);
+  }, [
+    unfoundItems,
+    unfoundSearch,
+    unfoundFilterRoom,
+    unfoundFilterApurador,
+    unfoundFilterPatrimonio,
+  ]);
 
   const sortedUnfoundItems = useMemo(() => {
     const sortRules =
@@ -2345,15 +2613,33 @@ export default function DashboardPage() {
   };
 
   const unfoundGrouped = useMemo(() => {
-    if (!unfoundGroupByRoom) return null;
+    if (!unfoundGroupByRoom && !unfoundGroupByApurador) return null;
     const groups = {};
     for (const item of sortedUnfoundItems) {
-      const key = getUnfoundInitialOrigin(item) || "Localização não informada";
+      const key = unfoundGroupByApurador
+        ? item.apurador || "Sem apurador"
+        : getUnfoundInitialOrigin(item) || "Localização não informada";
       if (!groups[key]) groups[key] = [];
       groups[key].push(item);
     }
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b, "pt-BR"));
-  }, [sortedUnfoundItems, unfoundGroupByRoom]);
+  }, [sortedUnfoundItems, unfoundGroupByRoom, unfoundGroupByApurador]);
+
+  const handleToggleGroupByRoom = () => {
+    setUnfoundGroupByRoom((prev) => {
+      const next = !prev;
+      if (next) setUnfoundGroupByApurador(false);
+      return next;
+    });
+  };
+
+  const handleToggleGroupByApurador = () => {
+    setUnfoundGroupByApurador((prev) => {
+      const next = !prev;
+      if (next) setUnfoundGroupByRoom(false);
+      return next;
+    });
+  };
 
   // ── Duplicatas: filtros + agrupamento ───────────────────────────────────
   const dupRooms = useMemo(() => {
@@ -2633,6 +2919,15 @@ export default function DashboardPage() {
                       >
                         Auditoria
                       </button>
+                      {canManageSpaces ? (
+                        <button
+                          type="button"
+                          onClick={() => router.push("/admin/observacoes")}
+                          className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          Observações e Duplicatas
+                        </button>
+                      ) : null}
                       {isInventoryAdmin ? (
                         <>
                           <button
@@ -2741,6 +3036,15 @@ export default function DashboardPage() {
                 >
                   Auditoria
                 </button>
+                {canManageSpaces ? (
+                  <button
+                    type="button"
+                    onClick={() => router.push("/admin/observacoes")}
+                    className="block w-full px-4 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Observações e Duplicatas
+                  </button>
+                ) : null}
                 {isInventoryAdmin ? (
                   <>
                     <button
@@ -3619,8 +3923,8 @@ export default function DashboardPage() {
           </section>
         ) : activeTab === "nao-localizados" ? (
           <section className="mt-10 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-            {/* Sub-abas */}
-            <div className="mb-5 flex gap-2 border-b border-slate-200 pb-3">
+            {/* Sub-abas — fica fixa no topo ao rolar a lista */}
+            <div className="sticky top-0 z-30 -mx-5 mb-5 flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white/95 px-5 pb-3 pt-1 backdrop-blur supports-[backdrop-filter]:bg-white/80">
               <button
                 type="button"
                 onClick={() => setUnfoundSubTab("itens")}
@@ -3654,6 +3958,30 @@ export default function DashboardPage() {
                   </span>
                 )}
               </button>
+
+              {/* Movimentação em lote dos itens selecionados */}
+              <button
+                type="button"
+                onClick={openBatchMoveModal}
+                disabled={selectedApuradorIds.size === 0}
+                title={
+                  selectedApuradorIds.size === 0
+                    ? "Selecione ao menos um item para movimentar"
+                    : `Movimentar ${selectedApuradorIds.size} item(ns) selecionado(s)`
+                }
+                className={`ml-auto flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold shadow-sm transition ${
+                  selectedApuradorIds.size === 0
+                    ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                    : "bg-blue-600 text-white hover:bg-blue-700"
+                }`}
+              >
+                🚚 Movimentar
+                {selectedApuradorIds.size > 0 && (
+                  <span className="rounded-full bg-white/20 px-1.5 py-0.5 text-xs font-semibold">
+                    {selectedApuradorIds.size}
+                  </span>
+                )}
+              </button>
             </div>
 
             {/* Sub-aba: Itens Não Localizados */}
@@ -3679,9 +4007,29 @@ export default function DashboardPage() {
                         <option key={r} value={r}>{r}</option>
                       ))}
                     </select>
+                    <select
+                      value={unfoundFilterApurador}
+                      onChange={(e) => setUnfoundFilterApurador(e.target.value)}
+                      className="max-w-[220px] rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-slate-700"
+                    >
+                      <option value="">Todos os apuradores</option>
+                      <option value={UNFOUND_NO_APURADOR}>Sem apurador</option>
+                      {unfoundApuradores.map((a) => (
+                        <option key={a} value={a} title={a}>{a}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={unfoundFilterPatrimonio}
+                      onChange={(e) => setUnfoundFilterPatrimonio(e.target.value)}
+                      className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-slate-700"
+                    >
+                      <option value="">Com e sem patrimônio</option>
+                      <option value="com">Somente com patrimônio</option>
+                      <option value="sem">Somente sem patrimônio (acervo)</option>
+                    </select>
                     <button
                       type="button"
-                      onClick={() => setUnfoundGroupByRoom((v) => !v)}
+                      onClick={handleToggleGroupByRoom}
                       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
                         unfoundGroupByRoom
                           ? "bg-indigo-600 text-white border-indigo-600"
@@ -3690,10 +4038,21 @@ export default function DashboardPage() {
                     >
                       🗂 Agrupar por sala
                     </button>
-                    {(unfoundSearch || unfoundFilterRoom) && (
+                    <button
+                      type="button"
+                      onClick={handleToggleGroupByApurador}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
+                        unfoundGroupByApurador
+                          ? "bg-indigo-600 text-white border-indigo-600"
+                          : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                      }`}
+                    >
+                      🧾 Agrupar por apurador
+                    </button>
+                    {(unfoundSearch || unfoundFilterRoom || unfoundFilterApurador || unfoundFilterPatrimonio) && (
                       <button
                         type="button"
-                        onClick={() => { setUnfoundSearch(""); setUnfoundFilterRoom(""); }}
+                        onClick={() => { setUnfoundSearch(""); setUnfoundFilterRoom(""); setUnfoundFilterApurador(""); setUnfoundFilterPatrimonio(""); }}
                         className="text-xs px-2 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
                       >
                         ✕ Limpar filtros
@@ -3702,6 +4061,30 @@ export default function DashboardPage() {
                     <span className="text-xs text-slate-400 ml-auto">
                       {filteredUnfoundItems.length} de {unfoundItems.length} item{unfoundItems.length !== 1 ? "s" : ""}
                     </span>
+                  </div>
+                )}
+
+                {selectedApuradorIds.size > 0 && (
+                  <div className="mb-4 flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+                    <span className="text-xs font-medium text-indigo-700">
+                      {selectedApuradorIds.size} item{selectedApuradorIds.size !== 1 ? "s" : ""} selecionado{selectedApuradorIds.size !== 1 ? "s" : ""}
+                    </span>
+                    {isInventoryAdmin && (
+                      <button
+                        type="button"
+                        onClick={openApuradorModalForSelection}
+                        className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700"
+                      >
+                        Definir apurador
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setSelectedApuradorIds(new Set())}
+                      className="text-xs text-indigo-700 hover:underline"
+                    >
+                      Limpar seleção
+                    </button>
                   </div>
                 )}
 
@@ -3722,23 +4105,36 @@ export default function DashboardPage() {
                   </div>
                 ) : unfoundGrouped ? (
                   <div className="space-y-4">
-                    {unfoundGrouped.map(([roomName, roomItems]) => (
-                      <div key={roomName} className="rounded-xl border border-slate-200 overflow-hidden">
+                    {unfoundGrouped.map(([groupName, groupItems]) => (
+                      <div key={groupName} className="rounded-xl border border-slate-200 overflow-hidden">
                         <div className="bg-slate-50 px-4 py-2.5 flex items-center gap-2 border-b border-slate-200">
-                          <span className="font-semibold text-sm text-slate-800">📍 {roomName}</span>
-                          <span className="text-xs px-2 py-0.5 bg-rose-100 text-rose-700 rounded-full font-medium">
-                            {roomItems.length} item{roomItems.length !== 1 ? "s" : ""}
+                          <span className="font-semibold text-sm text-slate-800">
+                            {unfoundGroupByApurador ? "🧾" : "📍"} {groupName}
+                          </span>
+                          <span
+                            className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                              unfoundGroupByApurador
+                                ? "bg-indigo-100 text-indigo-700"
+                                : "bg-rose-100 text-rose-700"
+                            }`}
+                          >
+                            {groupItems.length} item{groupItems.length !== 1 ? "s" : ""}
                           </span>
                         </div>
                         <UnfoundItemsTable
-                          items={roomItems}
+                          items={groupItems}
                           sorts={unfoundSorts}
                           onSort={handleUnfoundSort}
                           expandedItems={expandedUnfoundItems}
                           onToggleItem={(itemId) => setExpandedUnfoundItems((prev) => ({ ...prev, [itemId]: !prev[itemId] }))}
-                          onMoveItem={(item) => { setUnfoundCondicao("BOM"); setUnfoundMoveTargetSpaceId(""); setUnfoundActionModal({ item, action: "mover" }); }}
+                          onMoveItem={(item) => { setUnfoundCondicao("BOM"); setUnfoundMoveTargetSpaceId(""); setUnfoundMoveSpaceSearch(""); setUnfoundActionModal({ item, action: "mover" }); }}
                           abbreviateName={abbreviateName}
                           fmtDate={fmtDate}
+                          selectedIds={selectedApuradorIds}
+                          onToggleSelect={toggleApuradorSelect}
+                          onToggleSelectAll={toggleApuradorSelectAll}
+                          onOpenApurador={openApuradorModalForItem}
+                          canEditApurador={isInventoryAdmin}
                         />
                       </div>
                     ))}
@@ -3750,9 +4146,14 @@ export default function DashboardPage() {
                     onSort={handleUnfoundSort}
                     expandedItems={expandedUnfoundItems}
                     onToggleItem={(itemId) => setExpandedUnfoundItems((prev) => ({ ...prev, [itemId]: !prev[itemId] }))}
-                    onMoveItem={(item) => { setUnfoundCondicao("BOM"); setUnfoundMoveTargetSpaceId(""); setUnfoundActionModal({ item, action: "mover" }); }}
+                    onMoveItem={(item) => { setUnfoundCondicao("BOM"); setUnfoundMoveTargetSpaceId(""); setUnfoundMoveSpaceSearch(""); setUnfoundActionModal({ item, action: "mover" }); }}
                     abbreviateName={abbreviateName}
                     fmtDate={fmtDate}
+                    selectedIds={selectedApuradorIds}
+                    onToggleSelect={toggleApuradorSelect}
+                    onToggleSelectAll={toggleApuradorSelectAll}
+                    onOpenApurador={openApuradorModalForItem}
+                    canEditApurador={isInventoryAdmin}
                   />
                 )}
               </div>
@@ -4685,23 +5086,33 @@ export default function DashboardPage() {
               <p className="mb-2 text-sm font-semibold text-slate-700">
                 Sala de destino:
               </p>
+              <input
+                type="text"
+                value={unfoundMoveSpaceSearch}
+                onChange={(e) => setUnfoundMoveSpaceSearch(e.target.value)}
+                placeholder="Buscar sala…"
+                className="mb-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              />
               <select
                 value={unfoundMoveTargetSpaceId}
                 onChange={(e) => setUnfoundMoveTargetSpaceId(e.target.value)}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200"
               >
                 <option value="">Selecione uma sala...</option>
-                {spaces
-                  .filter((s) => s.isActive !== false && !s.isFinalized)
-                  .map((s) => {
-                    const isOrigin = s.id === unfoundActionModal?.item?.ultimoLocalConhecidoId;
-                    return (
-                      <option key={s.id} value={s.id}>
-                        {isOrigin ? `↩️ ${s.name} (desfazer — retornar ao local de origem)` : s.name}
-                      </option>
-                    );
-                  })}
+                {filterDestinationSpaces(spaces, unfoundMoveSpaceSearch).map((s) => {
+                  const isOrigin = s.id === unfoundActionModal?.item?.ultimoLocalConhecidoId;
+                  return (
+                    <option key={s.id} value={s.id}>
+                      {isOrigin ? `↩️ ${s.name} (desfazer — retornar ao local de origem)` : s.name}
+                    </option>
+                  );
+                })}
               </select>
+              {filterDestinationSpaces(spaces, unfoundMoveSpaceSearch).length === 0 && (
+                <p className="mt-1 text-xs text-slate-400">
+                  Nenhuma sala corresponde à busca.
+                </p>
+              )}
             </div>
 
             {unfoundMoveTargetSpaceId === unfoundActionModal?.item?.ultimoLocalConhecidoId ? (
@@ -4777,6 +5188,174 @@ export default function DashboardPage() {
               : unfoundMoveTargetSpaceId === unfoundActionModal?.item?.ultimoLocalConhecidoId
               ? "↩️ Desfazer não localizado"
               : "Confirmar mover"}
+          </button>
+        </ModalFooter>
+      </Modal>
+
+      {/* Modal de movimentação em lote dos itens não localizados selecionados */}
+      <Modal
+        isOpen={batchMoveModalOpen}
+        onClose={() => setBatchMoveModalOpen(false)}
+        title="Movimentar itens selecionados"
+        size="md"
+      >
+        <ModalBody>
+          <div className="space-y-4">
+            <p className="text-sm font-semibold text-slate-800">
+              {selectedApuradorIds.size} item
+              {selectedApuradorIds.size !== 1 ? "s" : ""} selecionado
+              {selectedApuradorIds.size !== 1 ? "s" : ""}
+            </p>
+
+            <div>
+              <p className="mb-2 text-sm font-semibold text-slate-700">
+                Sala de destino:
+              </p>
+              <input
+                type="text"
+                value={batchMoveSpaceSearch}
+                onChange={(e) => setBatchMoveSpaceSearch(e.target.value)}
+                placeholder="Buscar sala…"
+                className="mb-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200"
+              />
+              <select
+                value={batchMoveTargetSpaceId}
+                onChange={(e) => setBatchMoveTargetSpaceId(e.target.value)}
+                size={8}
+                className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm"
+              >
+                {!batchMoveTargetSpaceId && (
+                  <option value="" disabled>
+                    Selecione uma sala…
+                  </option>
+                )}
+                {filterDestinationSpaces(spaces, batchMoveSpaceSearch).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+              {filterDestinationSpaces(spaces, batchMoveSpaceSearch).length === 0 && (
+                <p className="mt-1 text-xs text-slate-400">
+                  Nenhuma sala corresponde à busca.
+                </p>
+              )}
+            </div>
+
+            <div>
+              <p className="mb-2 text-sm font-semibold text-slate-700">
+                Condição visual:
+              </p>
+              <div className="flex gap-2">
+                {[["BOM", "🟢 Bom"], ["REGULAR", "🟡 Regular"], ["RUIM", "🔴 Ruim"]].map(
+                  ([val, label]) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setBatchMoveCondicao(val)}
+                      className={`flex-1 rounded-lg px-2 py-2 text-xs font-medium transition ${
+                        batchMoveCondicao === val
+                          ? "bg-blue-600 text-white"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ),
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <p className="text-xs text-amber-800">
+                Os itens serão movidos para a sala selecionada e marcados como
+                encontrados com a condição informada. Itens já na sala de destino
+                terão a marcação &quot;não localizado&quot; desfeita, e itens em salas
+                finalizadas serão ignorados.
+              </p>
+            </div>
+          </div>
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => setBatchMoveModalOpen(false)}
+            disabled={savingBatchMove}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={handleBatchMoveSelected}
+            disabled={savingBatchMove || !batchMoveTargetSpaceId || selectedApuradorIds.size === 0}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {savingBatchMove
+              ? "Movendo..."
+              : `Mover ${selectedApuradorIds.size} item(ns)`}
+          </button>
+        </ModalFooter>
+      </Modal>
+
+      {/* Modal para definir/alterar o apurador (setor responsável) de itens não localizados */}
+      <Modal
+        isOpen={!!apuradorModal}
+        onClose={() => setApuradorModal(null)}
+        title="Definir apurador"
+        size="md"
+      >
+        <ModalBody>
+          <div className="space-y-3">
+            <p className="text-sm font-semibold text-slate-800">
+              {apuradorModal?.label}
+            </p>
+            <input
+              type="text"
+              value={apuradorSearchFilter}
+              onChange={(e) => setApuradorSearchFilter(e.target.value)}
+              placeholder="Buscar setor…"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200"
+            />
+            <select
+              value={apuradorSelectedValue}
+              onChange={(e) => setApuradorSelectedValue(e.target.value)}
+              size={10}
+              className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm"
+            >
+              {!apuradorSelectedValue && (
+                <option value="" disabled>
+                  Selecione um setor…
+                </option>
+              )}
+              {APURADOR_SETORES.filter((setor) =>
+                normalizeComparableText(setor).includes(
+                  normalizeComparableText(apuradorSearchFilter),
+                ),
+              ).map((setor) => (
+                <option key={setor} value={setor}>
+                  {setor}
+                </option>
+              ))}
+            </select>
+          </div>
+        </ModalBody>
+        <ModalFooter>
+          <button
+            type="button"
+            onClick={() => setApuradorModal(null)}
+            disabled={savingApurador}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={handleSaveApurador}
+            disabled={savingApurador || !apuradorSelectedValue}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {savingApurador ? "Salvando..." : "Confirmar"}
           </button>
         </ModalFooter>
       </Modal>

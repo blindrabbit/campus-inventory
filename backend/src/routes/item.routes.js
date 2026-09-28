@@ -5,6 +5,7 @@ import { verifyJWT } from "../middleware/auth.js";
 import {
   requireInventoryAccess,
   requireInventoryOperationalWrite,
+  requireInventoryRoles,
   requireInventoryWriteAccess,
   requireVerificationAccess,
 } from "../middleware/inventory.js";
@@ -283,7 +284,22 @@ function searchItemSelect({ includeDuplicateFields = true } = {}) {
   };
 }
 
-function scoreAndMapSearchResults(items, query) {
+async function buildUnfoundCountBySpaceGroup(prismaClient, inventoryId, matches) {
+  const groupIds = [...new Set(matches.map((m) => m.itemGroupId).filter(Boolean))];
+  if (groupIds.length === 0) return new Map();
+
+  const counts = await prismaClient.item.groupBy({
+    by: ["itemGroupId", "spaceId"],
+    where: { inventoryId, itemGroupId: { in: groupIds }, statusEncontrado: "NAO" },
+    _count: { _all: true },
+  });
+
+  return new Map(
+    counts.map((c) => [`${c.itemGroupId}::${c.spaceId}`, c._count._all]),
+  );
+}
+
+function scoreAndMapSearchResults(items, query, unfoundCountBySpaceGroup = new Map()) {
   const normalizedQuery = normalizeString(query);
   const queryAsNumber = normalizePatrimonioNumber(query);
 
@@ -373,6 +389,11 @@ function scoreAndMapSearchResults(items, query) {
             id: item.itemGroup.id,
             name: item.itemGroup.name,
             totalItems: item.itemGroup._count.items,
+            // Quantidade de itens NÃO LOCALIZADOS do grupo especificamente
+            // nesta sala de origem — é o teto real para relocate-group,
+            // diferente de totalItems (que soma o grupo inteiro no inventário).
+            availableToMoveFromSpace:
+              unfoundCountBySpaceGroup.get(`${item.itemGroupId}::${item.spaceId}`) || 0,
           }
         : null,
     }));
@@ -519,6 +540,7 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
   try {
     const q = req.query.q?.toString().trim();
     const excludeSpaceId = req.query.excludeSpaceId?.toString();
+    const onlyUnfound = req.query.onlyUnfound === "true";
 
     if (!q || q.length < 2) {
       return res
@@ -529,6 +551,7 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
     const where = {
       inventoryId: req.inventoryId,
       ...(excludeSpaceId ? { NOT: { spaceId: excludeSpaceId } } : {}),
+      ...(onlyUnfound ? { statusEncontrado: "NAO" } : {}),
     };
 
     const matches = await prisma.item.findMany({
@@ -536,15 +559,23 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
       select: searchItemSelect(),
     });
 
-    res.json(scoreAndMapSearchResults(matches, q));
+    const unfoundCountBySpaceGroup = await buildUnfoundCountBySpaceGroup(
+      prisma,
+      req.inventoryId,
+      matches,
+    );
+
+    res.json(scoreAndMapSearchResults(matches, q, unfoundCountBySpaceGroup));
   } catch (err) {
     if (isMissingDuplicateSchemaError(err)) {
       try {
         const q = req.query.q?.toString().trim();
         const excludeSpaceId = req.query.excludeSpaceId?.toString();
+        const onlyUnfound = req.query.onlyUnfound === "true";
         const where = {
           inventoryId: req.inventoryId,
           ...(excludeSpaceId ? { NOT: { spaceId: excludeSpaceId } } : {}),
+          ...(onlyUnfound ? { statusEncontrado: "NAO" } : {}),
         };
         console.warn(
           "[items/search] Duplicate columns are not available yet; searching without duplicate metadata.",
@@ -553,7 +584,14 @@ router.get("/search", verifyJWT, requireInventoryAccess(), async (req, res) => {
           where,
           select: searchItemSelect({ includeDuplicateFields: false }),
         });
-        return res.json(scoreAndMapSearchResults(matches, q));
+        const unfoundCountBySpaceGroup = await buildUnfoundCountBySpaceGroup(
+          prisma,
+          req.inventoryId,
+          matches,
+        );
+        return res.json(
+          scoreAndMapSearchResults(matches, q, unfoundCountBySpaceGroup),
+        );
       } catch (fallbackErr) {
         console.error("Error searching items with legacy fallback:", fallbackErr);
       }
@@ -1220,13 +1258,19 @@ router.post(
           where: { id: targetSpaceId, inventoryId: req.inventoryId, isActive: true },
           select: { id: true, name: true, isFinalized: true },
         }),
+        // Só itens "não localizados" podem ser puxados em bloco: itens já
+        // confirmados (SIM) ou em trânsito pendente de outra realocação
+        // (PENDENTE) já estão alocados/localizados e não devem ser
+        // arrancados da sala de origem por essa movimentação de grupo.
         prisma.item.findMany({
           where: {
             inventoryId: req.inventoryId,
             itemGroupId,
             spaceId: sourceSpaceId,
+            statusEncontrado: "NAO",
           },
           select: { id: true, statusEncontrado: true },
+          orderBy: [{ patrimonio: "asc" }, { id: "asc" }],
           take: qty,
         }),
       ]);
@@ -1247,28 +1291,20 @@ router.post(
         where: { id: sourceSpaceId },
         select: { id: true, name: true, isFinalized: true },
       });
-      if (sourceSpace?.isFinalized) {
-        const allUnfound = items.every((i) => i.statusEncontrado === "NAO");
-        if (!allUnfound) {
-          return res
-            .status(409)
-            .json({
-              error: "Esta sala está finalizada e não pode ter itens removidos",
-            });
-        }
-      }
+      // Todos os itens retornados já são statusEncontrado="NAO" (ver query acima),
+      // então salas lacradas sempre permitem remover esses itens sem substituto.
 
       if (items.length === 0) {
         return res.status(404).json({
-          error: "Nenhum item do grupo encontrado no espaço de origem",
+          error:
+            "Nenhum item não localizado deste grupo foi encontrado no espaço de origem para movimentação",
         });
       }
 
+      const partialMove = items.length < qty;
+
       const movedAt = new Date();
       const itemIds = items.map((i) => i.id);
-      const unfoundSet = new Set(
-        items.filter((i) => i.statusEncontrado === "NAO").map((i) => i.id),
-      );
 
       const relocationData = itemIds.map((itemId) => ({
         itemId,
@@ -1277,7 +1313,7 @@ router.post(
         movedBy: user.sub,
         movedAt,
         pendingConfirm: true,
-        wasUnfound: unfoundSet.has(itemId),
+        wasUnfound: true,
       }));
 
       await prisma.$transaction([
@@ -1362,7 +1398,11 @@ router.post(
       res.json({
         success: true,
         movedCount: items.length,
-        message: `${items.length} item(ns) do grupo realocados com sucesso`,
+        requestedCount: qty,
+        partialMove,
+        message: partialMove
+          ? `Apenas ${items.length} de ${qty} item(ns) solicitado(s) foram movidos: não havia itens "não localizados" suficientes neste grupo no espaço de origem.`
+          : `${items.length} item(ns) do grupo realocados com sucesso`,
       });
     } catch (err) {
       console.error("Error relocating group items:", err);
@@ -2195,6 +2235,296 @@ router.post(
     } catch (err) {
       console.error("Error relocating items in batch:", err);
       res.status(500).json({ error: "Erro ao mover itens em massa" });
+    }
+  },
+);
+
+/**
+ * POST /api/items/relocate-selected
+ * Move uma seleção arbitrária de itens (por id) para uma sala de destino.
+ * Espelha o fluxo individual usado na aba "Não Localizados":
+ *  - item já na sala de destino e marcado como NAO  -> desfaz o "não localizado" (volta para PENDENTE)
+ *  - item em outra sala                             -> realoca e marca como encontrado com a condição informada
+ * Itens que não podem ser movidos (sala de origem lacrada, já no destino e não pendente) são pulados.
+ */
+router.post(
+  "/relocate-selected",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryWriteAccess(),
+  requireInventoryOperationalWrite(),
+  async (req, res) => {
+    try {
+      const { itemIds, targetSpaceId, condicao, connectionId } = req.body;
+      const user = req.user;
+
+      if (!Array.isArray(itemIds) || itemIds.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "itemIds é obrigatório e deve ser um array não-vazio" });
+      }
+      if (!targetSpaceId) {
+        return res.status(400).json({ error: "targetSpaceId é obrigatório" });
+      }
+
+      const targetSpace = await prisma.space.findFirst({
+        where: { id: targetSpaceId, inventoryId: req.inventoryId, isActive: true },
+        select: { id: true, name: true, isFinalized: true },
+      });
+      if (!targetSpace) {
+        return res.status(400).json({ error: "Espaço de destino inválido" });
+      }
+      if (targetSpace.isFinalized) {
+        return res.status(409).json({
+          error: "A sala de destino está finalizada e não pode receber itens",
+        });
+      }
+
+      const items = await prisma.item.findMany({
+        where: { id: { in: itemIds }, inventoryId: req.inventoryId },
+        select: {
+          id: true,
+          spaceId: true,
+          patrimonio: true,
+          statusEncontrado: true,
+        },
+      });
+
+      if (items.length === 0) {
+        return res.json({
+          success: true,
+          movedCount: 0,
+          undoneCount: 0,
+          skippedCount: 0,
+          skipped: [],
+        });
+      }
+
+      const sourceSpaceIds = [
+        ...new Set(items.map((item) => item.spaceId).filter(Boolean)),
+      ];
+      const sourceSpaces = await prisma.space.findMany({
+        where: { id: { in: sourceSpaceIds }, inventoryId: req.inventoryId },
+        select: { id: true, name: true, isFinalized: true },
+      });
+      const sourceSpaceById = new Map(sourceSpaces.map((s) => [s.id, s]));
+
+      const toMove = [];
+      const toUndo = [];
+      const skipped = [];
+
+      for (const item of items) {
+        if (item.spaceId === targetSpaceId) {
+          if (item.statusEncontrado === "NAO") {
+            toUndo.push(item);
+          } else {
+            skipped.push({
+              patrimonio: item.patrimonio,
+              reason: "Item já está na sala de destino",
+            });
+          }
+          continue;
+        }
+
+        const sourceSpace = sourceSpaceById.get(item.spaceId);
+        if (sourceSpace?.isFinalized && item.statusEncontrado !== "NAO") {
+          skipped.push({
+            patrimonio: item.patrimonio,
+            reason: `Sala de origem finalizada (${sourceSpace.name})`,
+          });
+          continue;
+        }
+
+        toMove.push(item);
+      }
+
+      const timestamp = new Date();
+      const operations = [];
+
+      // Agrupa por sala de origem: lastKnownSpaceId difere por grupo
+      const movedBySource = new Map();
+      for (const item of toMove) {
+        if (!movedBySource.has(item.spaceId)) movedBySource.set(item.spaceId, []);
+        movedBySource.get(item.spaceId).push(item);
+      }
+
+      for (const [sourceSpaceId, groupItems] of movedBySource) {
+        const groupIds = groupItems.map((item) => item.id);
+        operations.push(
+          prisma.item.updateMany({
+            where: { id: { in: groupIds }, inventoryId: req.inventoryId },
+            data: {
+              spaceId: targetSpaceId,
+              lastKnownSpaceId: sourceSpaceId,
+              statusEncontrado: "SIM",
+              condicaoVisual: condicao || null,
+              dataConferencia: timestamp,
+              ultimoConferente: user.sub,
+            },
+          }),
+          prisma.relocation.deleteMany({ where: { itemId: { in: groupIds } } }),
+          prisma.relocation.createMany({
+            data: groupItems.map((item) => ({
+              itemId: item.id,
+              fromSpaceId: sourceSpaceId,
+              toSpaceId: targetSpaceId,
+              movedBy: user.sub,
+              movedAt: timestamp,
+              // já confirmado: a movimentação em lote registra a conferência no destino
+              pendingConfirm: false,
+              wasUnfound: item.statusEncontrado === "NAO",
+            })),
+          }),
+          prisma.itemHistorico.createMany({
+            data: groupItems.flatMap((item) => [
+              {
+                itemId: item.id,
+                fromSpaceId: sourceSpaceId,
+                toSpaceId: targetSpaceId,
+                action: "REALOCADO",
+                createdBy: user.sub,
+                createdAt: timestamp,
+                metadata: JSON.stringify({
+                  batch: true,
+                  source: "unfound-multi-select",
+                  condicao: condicao || null,
+                }),
+              },
+              {
+                itemId: item.id,
+                fromSpaceId: sourceSpaceId,
+                toSpaceId: targetSpaceId,
+                action: "ENCONTRADO",
+                createdBy: user.sub,
+                createdAt: timestamp,
+                metadata: JSON.stringify({
+                  batch: true,
+                  source: "unfound-multi-select",
+                  condicao: condicao || null,
+                }),
+              },
+            ]),
+          }),
+        );
+      }
+
+      if (toUndo.length > 0) {
+        const undoIds = toUndo.map((item) => item.id);
+        operations.push(
+          prisma.item.updateMany({
+            where: { id: { in: undoIds }, inventoryId: req.inventoryId },
+            data: { statusEncontrado: "PENDENTE" },
+          }),
+          prisma.itemHistorico.createMany({
+            data: toUndo.map((item) => ({
+              itemId: item.id,
+              fromSpaceId: item.spaceId,
+              toSpaceId: item.spaceId,
+              action: "DESFEITO_NAO_LOCALIZADO",
+              createdBy: user.sub,
+              createdAt: timestamp,
+              metadata: JSON.stringify({
+                batch: true,
+                source: "unfound-multi-select",
+              }),
+            })),
+          }),
+        );
+      }
+
+      if (operations.length > 0) {
+        await prisma.$transaction(operations);
+      }
+
+      if (toMove.length > 0) {
+        await markSpaceStarted(prisma, {
+          inventoryId: req.inventoryId,
+          spaceId: targetSpaceId,
+          user,
+        });
+      }
+
+      const excludeClientId = connectionId
+        ? `${req.inventoryId}:${user.sub}:${connectionId}`
+        : undefined;
+
+      if (toMove.length > 0) {
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId: targetSpaceId,
+          action: "batch_relocated",
+          excludeClientId,
+          payload: {
+            toSpaceId: targetSpaceId,
+            toSpaceName: targetSpace.name,
+            user: user.fullName || user.sub,
+            count: toMove.length,
+            timestamp,
+          },
+        });
+
+        for (const [sourceSpaceId, groupItems] of movedBySource) {
+          broadcast({
+            inventoryId: req.inventoryId,
+            spaceId: sourceSpaceId,
+            action: "batch_left_space",
+            excludeClientId,
+            payload: {
+              fromSpaceId: sourceSpaceId,
+              fromSpaceName: sourceSpaceById.get(sourceSpaceId)?.name,
+              toSpaceId: targetSpaceId,
+              toSpaceName: targetSpace.name,
+              user: user.fullName || user.sub,
+              count: groupItems.length,
+              timestamp,
+            },
+          });
+        }
+      }
+
+      for (const item of toUndo) {
+        broadcast({
+          inventoryId: req.inventoryId,
+          spaceId: item.spaceId,
+          action: "item_restored",
+          excludeClientId,
+          payload: {
+            itemId: item.id,
+            patrimonio: item.patrimonio,
+            spaceId: item.spaceId,
+            action: "DESFEITO_NAO_LOCALIZADO",
+            user: user.fullName || user.sub,
+            timestamp,
+          },
+        });
+      }
+
+      try {
+        const affectedSpaceIds = new Set([
+          targetSpaceId,
+          ...movedBySource.keys(),
+          ...toUndo.map((item) => item.spaceId),
+        ]);
+        for (const spaceId of affectedSpaceIds) {
+          if (spaceId) await recomputeSpaceCounters(spaceId, req.inventoryId);
+        }
+      } catch (err) {
+        console.warn(
+          "Failed to recompute counters after selected relocate:",
+          err.message || err,
+        );
+      }
+
+      res.json({
+        success: true,
+        movedCount: toMove.length,
+        undoneCount: toUndo.length,
+        skippedCount: skipped.length,
+        skipped,
+      });
+    } catch (err) {
+      console.error("Error relocating selected items:", err);
+      res.status(500).json({ error: "Erro ao mover os itens selecionados" });
     }
   },
 );
@@ -3403,6 +3733,122 @@ router.patch(
     } catch (err) {
       console.error("Error resolving duplicate:", err);
       res.status(500).json({ error: "Erro ao resolver duplicata" });
+    }
+  },
+);
+
+// PATCH /items/:itemId/apurador — define ou altera o setor apurador de um item não localizado.
+// Sem requireInventoryOperationalWrite: a apuração de responsabilidade normalmente ocorre
+// durante/após EM_AUDITORIA, mesma exceção já aplicada às rotas de verificação do Revisor.
+router.patch(
+  "/:itemId/apurador",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryRoles("ADMIN_CICLO"),
+  async (req, res) => {
+    try {
+      const { itemId } = req.params;
+      const { apurador } = req.body;
+      const user = req.user;
+
+      if (!apurador || !apurador.toString().trim()) {
+        return res.status(400).json({ error: "Informe o setor apurador" });
+      }
+      const newApurador = apurador.toString().trim();
+
+      const item = await prisma.item.findFirst({
+        where: { id: itemId, inventoryId: req.inventoryId },
+        select: { id: true, spaceId: true, apurador: true },
+      });
+      if (!item) return res.status(404).json({ error: "Item não encontrado" });
+
+      const previousApurador = item.apurador;
+
+      await prisma.$transaction(async (tx) => {
+        await tx.item.update({
+          where: { id: itemId },
+          data: { apurador: newApurador },
+        });
+
+        await recordItemHistory(tx, {
+          itemId,
+          fromSpaceId: item.spaceId,
+          toSpaceId: item.spaceId,
+          action: previousApurador ? "APURADOR_ALTERADO" : "APURADOR_DEFINIDO",
+          reason: previousApurador
+            ? `Apurador alterado de "${previousApurador}" para "${newApurador}"`
+            : `Apurador definido: ${newApurador}`,
+          createdBy: user.sub,
+          metadata: { previousApurador, apurador: newApurador },
+        });
+      });
+
+      res.json({ success: true, item: { id: item.id, apurador: newApurador } });
+    } catch (err) {
+      console.error("Error setting apurador:", err);
+      res.status(500).json({ error: "Erro ao definir apurador" });
+    }
+  },
+);
+
+// POST /items/apurador-batch — define/altera o apurador de múltiplos itens de uma vez (multi-select)
+router.post(
+  "/apurador-batch",
+  verifyJWT,
+  requireInventoryAccess(),
+  requireInventoryRoles("ADMIN_CICLO"),
+  async (req, res) => {
+    try {
+      const { itemIds, apurador } = req.body;
+      const user = req.user;
+
+      if (!Array.isArray(itemIds) || itemIds.length === 0) {
+        return res.status(400).json({ error: "itemIds é obrigatório e deve ser um array não-vazio" });
+      }
+      if (!apurador || !apurador.toString().trim()) {
+        return res.status(400).json({ error: "Informe o setor apurador" });
+      }
+      const newApurador = apurador.toString().trim();
+
+      const items = await prisma.item.findMany({
+        where: { id: { in: itemIds }, inventoryId: req.inventoryId },
+        select: { id: true, spaceId: true, apurador: true },
+      });
+      if (items.length === 0) {
+        return res.json({ success: true, updatedCount: 0 });
+      }
+
+      const timestamp = new Date();
+      await prisma.$transaction([
+        prisma.item.updateMany({
+          where: { id: { in: items.map((i) => i.id) } },
+          data: { apurador: newApurador },
+        }),
+        prisma.itemHistorico.createMany({
+          data: items.map((item) => ({
+            itemId: item.id,
+            fromSpaceId: item.spaceId,
+            toSpaceId: item.spaceId,
+            action: item.apurador ? "APURADOR_ALTERADO" : "APURADOR_DEFINIDO",
+            createdBy: user.sub,
+            createdAt: timestamp,
+            reason: item.apurador
+              ? `Apurador alterado de "${item.apurador}" para "${newApurador}" (em lote)`
+              : `Apurador definido: ${newApurador} (em lote)`,
+            metadata: JSON.stringify({
+              batch: true,
+              source: "apurador-multi-select",
+              previousApurador: item.apurador,
+              apurador: newApurador,
+            }),
+          })),
+        }),
+      ]);
+
+      res.json({ success: true, updatedCount: items.length });
+    } catch (err) {
+      console.error("Error in apurador-batch:", err);
+      res.status(500).json({ error: "Erro ao definir apurador em lote" });
     }
   },
 );

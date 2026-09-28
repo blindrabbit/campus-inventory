@@ -75,6 +75,7 @@ export default function RoomPage() {
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
   const [searchError, setSearchError] = useState("");
+  const [searchOnlyUnfound, setSearchOnlyUnfound] = useState(false);
   const [isFinalizeModalOpen, setIsFinalizeModalOpen] = useState(false);
   const [pendingMoveCandidate, setPendingMoveCandidate] = useState(null);
   const [groupMoveCount, setGroupMoveCount] = useState("");
@@ -1091,7 +1092,7 @@ export default function RoomPage() {
     }
   };
 
-  const handleSearchPatrimonio = async () => {
+  const handleSearchPatrimonio = async (onlyUnfoundOverride) => {
     const query = searchTerm.trim();
     if (query.length < 2) {
       showToast({
@@ -1104,6 +1105,9 @@ export default function RoomPage() {
       return;
     }
 
+    const onlyUnfound =
+      onlyUnfoundOverride !== undefined ? onlyUnfoundOverride : searchOnlyUnfound;
+
     setSearching(true);
     setSearchError("");
 
@@ -1114,6 +1118,7 @@ export default function RoomPage() {
         params: {
           inventoryId,
           q: query,
+          onlyUnfound: onlyUnfound || undefined,
         },
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -1140,6 +1145,14 @@ export default function RoomPage() {
     }
   };
 
+  const visibleSearchResults = useMemo(
+    () =>
+      searchOnlyUnfound
+        ? searchResults.filter((c) => c.statusEncontrado === "NAO")
+        : searchResults,
+    [searchResults, searchOnlyUnfound],
+  );
+
   const confirmMoveToCurrentRoom = useCallback(async () => {
     if (!pendingMoveCandidate) return;
 
@@ -1148,6 +1161,16 @@ export default function RoomPage() {
 
     // Batch de grupo: mover N itens do grupo via endpoint dedicado
     if (pendingMoveCandidate.itemGroup && groupMoveCount !== "") {
+      const available = pendingMoveCandidate.itemGroup.availableToMoveFromSpace ?? 0;
+      if (Number(groupMoveCount) > available) {
+        showToast({
+          type: "error",
+          title: "Quantidade indisponível",
+          message: `Só há ${available} item(ns) não localizado(s) deste grupo na sala de origem "${pendingMoveCandidate.spaceName}".`,
+        });
+        return;
+      }
+
       setSaving(true);
       try {
         const { data } = await axios.post(
@@ -1172,8 +1195,8 @@ export default function RoomPage() {
         // Recarrega os itens da sala para refletir os novos itens movidos
         loadData(token, inventoryId);
         showToast({
-          type: "success",
-          title: "Grupo realocado",
+          type: data.partialMove ? "warning" : "success",
+          title: data.partialMove ? "Movimentação parcial" : "Grupo realocado",
           message:
             data.message || `${data.movedCount} item(ns) movidos com sucesso.`,
         });
@@ -2248,7 +2271,7 @@ export default function RoomPage() {
                     className="flex-1 border rounded-lg px-3 py-2"
                   />
                   <button
-                    onClick={handleSearchPatrimonio}
+                    onClick={() => handleSearchPatrimonio()}
                     disabled={searching}
                     className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-black disabled:opacity-50"
                   >
@@ -2256,13 +2279,57 @@ export default function RoomPage() {
                   </button>
                 </div>
 
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={searchOnlyUnfound}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setSearchOnlyUnfound(checked);
+                      if (searchTerm.trim().length >= 2) {
+                        handleSearchPatrimonio(checked);
+                      }
+                    }}
+                    className="rounded border-slate-300"
+                  />
+                  Apenas itens não localizados
+                </label>
+
                 {searchError && (
                   <p className="text-sm text-red-600">{searchError}</p>
                 )}
 
-                {searchResults.length > 0 && (
-                  <ul className="border rounded-lg divide-y max-h-64 overflow-auto">
-	                    {searchResults.map((candidate) => {
+                {searchResults.length > 0 && visibleSearchResults.length === 0 && (
+                  <p className="text-sm text-gray-500">
+                    Nenhum item não localizado encontrado para este termo — todos os
+                    resultados já estão encontrados ou pendentes de confirmação em
+                    outra sala.
+                  </p>
+                )}
+
+                {visibleSearchResults.length > 0 && (
+                  <div className="border rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50 border-b">
+                      <span className="text-xs font-medium text-slate-500">
+                        {visibleSearchResults.length} resultado
+                        {visibleSearchResults.length !== 1 ? "s" : ""}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchResults([]);
+                          setSearchTerm("");
+                          setSearchError("");
+                        }}
+                        aria-label="Fechar resultados da busca"
+                        title="Fechar resultados da busca"
+                        className="text-slate-400 hover:text-slate-700 leading-none text-lg px-1"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <ul className="divide-y max-h-64 overflow-auto">
+	                    {visibleSearchResults.map((candidate) => {
 	                      const isInCurrentRoom = candidate.spaceId === spaceId;
 	                      const isSealed = !isInCurrentRoom && candidate.spaceIsFinalized && candidate.statusEncontrado !== "NAO";
 	                      const isRevisorVerified = candidate.spaceIsVerifiedByRevisor;
@@ -2311,10 +2378,27 @@ export default function RoomPage() {
                                 )}
                               </p>
                             )}
-	                            <p className="text-xs text-gray-500">
-	                              {isInCurrentRoom
-	                                ? `Já está nesta sala${candidate.spaceName ? ` • ${candidate.spaceName}` : ""}`
-	                                : `Origem: ${candidate.spaceName || "Sala não informada"}`}
+	                            <p className="text-xs text-gray-500 flex items-center gap-1.5 flex-wrap">
+	                              <span>
+	                                {isInCurrentRoom
+	                                  ? `Já está nesta sala${candidate.spaceName ? ` • ${candidate.spaceName}` : ""}`
+	                                  : `Origem: ${candidate.spaceName || "Sala não informada"}`}
+	                              </span>
+	                              <span
+	                                className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+	                                  candidate.statusEncontrado === "SIM"
+	                                    ? "bg-emerald-100 text-emerald-700"
+	                                    : candidate.statusEncontrado === "PENDENTE"
+	                                    ? "bg-yellow-100 text-yellow-700"
+	                                    : "bg-red-100 text-red-700"
+	                                }`}
+	                              >
+	                                {candidate.statusEncontrado === "SIM"
+	                                  ? "Encontrado"
+	                                  : candidate.statusEncontrado === "PENDENTE"
+	                                  ? "Aguardando confirmação"
+	                                  : "Não localizado"}
+	                              </span>
 	                            </p>
 	                            {isDuplicateObservedHere && (
 	                              <p className="text-xs text-orange-700 font-medium mt-1">
@@ -2403,7 +2487,8 @@ export default function RoomPage() {
 	                        </li>
                       );
                     })}
-                  </ul>
+                    </ul>
+                  </div>
                 )}
               </div>
             ) : (
@@ -3793,7 +3878,12 @@ export default function RoomPage() {
                       </span>
                       {" · "}
                       {pendingMoveCandidate.itemGroup.totalItems} item(ns) no
-                      grupo
+                      grupo (inventário todo)
+                    </p>
+                    <p className="mt-0.5 text-xs font-semibold text-amber-900">
+                      {pendingMoveCandidate.itemGroup.availableToMoveFromSpace ?? 0}{" "}
+                      item(ns) não localizado(s) disponível(is) para mover a
+                      partir de "{pendingMoveCandidate.spaceName}"
                     </p>
                   </div>
                   <div>
@@ -3803,10 +3893,10 @@ export default function RoomPage() {
                     <input
                       type="number"
                       min="1"
-                      max={pendingMoveCandidate.itemGroup.totalItems}
+                      max={pendingMoveCandidate.itemGroup.availableToMoveFromSpace || 1}
                       value={groupMoveCount}
                       onChange={(e) => setGroupMoveCount(e.target.value)}
-                      placeholder={`1 – ${pendingMoveCandidate.itemGroup.totalItems}`}
+                      placeholder={`1 – ${pendingMoveCandidate.itemGroup.availableToMoveFromSpace ?? 0}`}
                       className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm focus:border-amber-500 focus:outline-none"
                     />
                   </div>
@@ -3831,7 +3921,10 @@ export default function RoomPage() {
             onClick={confirmMoveToCurrentRoom}
             disabled={
               saving ||
-              (pendingMoveCandidate?.itemGroup && groupMoveCount === "")
+              (pendingMoveCandidate?.itemGroup &&
+                (groupMoveCount === "" ||
+                  Number(groupMoveCount) >
+                    (pendingMoveCandidate.itemGroup.availableToMoveFromSpace ?? 0)))
             }
             className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
           >
